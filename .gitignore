@@ -1,0 +1,34 @@
+# Model and calibration artifacts
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.npz
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local experiments and legacy scripts not included in the v2 release
+/*.txt
+/convert_anima_lora.py
+/convert_anima_lora_v3.py
+/from safetensors.py
+/lora_partial_match_converter.py
+/lora_prefix_mapper.py
+/model_Analysis.py

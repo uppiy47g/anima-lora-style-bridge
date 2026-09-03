@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anima-lora-style-bridge"
+version = "1.0.0"
+description = "Reuse SD 1.5/SDXL LoRA styles with Anima through experimental weight bridging"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Anima LoRA Style Bridge contributors" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Multimedia :: Graphics",
+]
+dependencies = [
+  "numpy>=1.24",
+  "safetensors>=0.4",
+  "torch>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+]
+
+[project.scripts]
+anima-style-bridge = "anima_style_bridge:main"
+
+[tool.setuptools]
+py-modules = ["anima_style_bridge"]
