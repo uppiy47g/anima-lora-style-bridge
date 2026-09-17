@@ -12,16 +12,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install package
         run: python -m pip install .
       - name: Run tests
         run: python -m unittest discover -s tests -v
+      - name: Verify CLI
+        run: |
+          anima-style-bridge --version
+          anima-style-bridge distill-v3 --help
+          anima-style-bridge distill-v3-hybrid --help
       - name: Build wheel
+        if: matrix.python-version == '3.11'
         run: python -m pip wheel . --no-deps --wheel-dir dist
