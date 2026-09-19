@@ -1,20 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "anima-lora-style-bridge"
-version = "1.0.0"
-description = "Reuse SD 1.5/SDXL LoRA styles with Anima through experimental weight bridging"
+version = "3.1.0"
+description = "Distill SDXL LoRA activation differences into native Anima LoRAs"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "Anima LoRA Style Bridge contributors" },
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -22,9 +22,15 @@ classifiers = [
 ]
 dependencies = [
   "numpy>=1.24",
+  "packaging>=21",
   "safetensors>=0.4",
   "torch>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/uppiy47g/anima-lora-style-bridge"
+Repository = "https://github.com/uppiy47g/anima-lora-style-bridge"
+Issues = "https://github.com/uppiy47g/anima-lora-style-bridge/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -36,3 +42,4 @@ anima-style-bridge = "anima_style_bridge:main"
 
 [tool.setuptools]
 py-modules = ["anima_style_bridge"]
+packages = ["comfyui_nodes"]
