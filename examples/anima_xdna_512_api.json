@@ -1,0 +1,30 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "anima-base-v1.0.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "LoadAttachAnimaXDNAModel",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "checkpoint": "C:\\path\\to\\Anima-Base-v1.0-Diffusers\\transformer\\diffusion_pytorch_model.safetensors",
+      "rebuild_cache": false,
+      "cache_dir": ""
+    }
+  },
+  "3": {
+    "class_type": "AnimaXDNARuntimeStatus",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ]
+    }
+  }
+}

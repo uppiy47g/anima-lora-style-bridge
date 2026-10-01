@@ -48,6 +48,19 @@ cd anima_lora_style_bridge
 python -m pip install .
 ```
 
+### XDNA 2 MODELラッパー
+
+Windows XDNA 2環境では、同梱の
+`Load/Attach Anima XDNA Model`ノードに通常のAnima Base v1.0 MODELを
+接続すると、28 Transformer blockだけをresident Triton-XDNA/XRT runtimeへ
+置換できます。ONNX/Vitis AI EPは使用せず、元MODELをcloneするため破壊しません。
+対応shapeは現在batch 1・512x512・context 512のみです。LoRA/LLLite/INT8や
+未知のComfyUI APIはsilent ignoreせず拒否します。
+
+導入、必要な2種類のcheckpoint、対応境界、diagnostics、unload方法および実機
+測定値は[`comfyui_xdna_nodes/README.md`](comfyui_xdna_nodes/README.md)を
+参照してください。
+
 ## 使い方
 
 ### v3: 活性差分蒸留

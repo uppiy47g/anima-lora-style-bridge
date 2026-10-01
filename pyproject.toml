@@ -48,4 +48,4 @@ anima-xdna-cache = "anima_xdna_poc.cli:cache_main"
 
 [tool.setuptools]
 py-modules = ["anima_style_bridge"]
-packages = ["comfyui_nodes", "anima_xdna_poc"]
+packages = ["comfyui_nodes", "comfyui_xdna_nodes", "anima_xdna_poc"]
