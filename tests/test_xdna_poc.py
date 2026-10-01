@@ -1,7 +1,10 @@
 import tempfile
 import unittest
 import os
+import json
 from pathlib import Path
+import threading
+from unittest import mock
 
 import torch
 from safetensors.torch import save_file
@@ -23,6 +26,13 @@ from anima_xdna_poc.block_checkpoint import (
     load_block_weights,
 )
 from anima_xdna_poc.chain import AnimaXDNAChainRuntime
+from anima_xdna_poc.weight_cache import (
+    CacheIntegrityError,
+    CacheNamespace,
+    LAYOUT_VERSION,
+    PackedWeightCache,
+    fingerprint_source,
+)
 
 
 def _tiny_block_config():
@@ -63,6 +73,263 @@ def _block_tensors(config, fill=0.0):
         }
     )
     return tensors
+
+
+def _save_blocks(path, config, count=1, fill=0.0):
+    tensors = {}
+    for index in range(count):
+        tensors.update(
+            {
+                f"transformer_blocks.{index}.{name}": tensor
+                for name, tensor in _block_tensors(config, fill + index).items()
+            }
+        )
+    save_file(tensors, path)
+
+
+class PackedWeightCacheTests(unittest.TestCase):
+    def test_deterministic_key_and_future_namespace_fields(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config)
+            cache = PackedWeightCache(
+                checkpoint, config, 0, 1, root / "cache"
+            )
+            key1, descriptor1, _ = cache.identify()
+            key2, descriptor2, _ = cache.identify()
+        self.assertEqual(key1, key2)
+        self.assertEqual(descriptor1, descriptor2)
+        namespace = descriptor1["namespace"]
+        self.assertEqual(namespace["adapter_fingerprints"], [])
+        self.assertIsNone(namespace["merge_strength"])
+        self.assertEqual(namespace["quantization_scheme"], "none")
+        self.assertEqual(namespace["layout_version"], LAYOUT_VERSION)
+        self.assertEqual(
+            CacheNamespace(namespace["base_model_fingerprint"]).quantization_scheme,
+            "none",
+        )
+
+    def test_source_content_change_invalidates_key(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config, fill=0.0)
+            first = PackedWeightCache(checkpoint, config, 0, 1, root / "cache")
+            key1, _, _ = first.identify()
+            _save_blocks(checkpoint, config, fill=1.0)
+            second = PackedWeightCache(checkpoint, config, 0, 1, root / "cache")
+            key2, _, _ = second.identify()
+        self.assertNotEqual(key1, key2)
+
+    def test_header_shape_dtype_layout_and_tool_versions_invalidate_key(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config)
+            cache = PackedWeightCache(checkpoint, config, 0, 1, root / "cache")
+            key, _, _ = cache.identify()
+            changed_config = AnimaBlockConfig(
+                **{**config.__dict__, "max_size": (9, 8, 8)}
+            )
+            changed, _, _ = PackedWeightCache(
+                checkpoint, changed_config, 0, 1, root / "cache"
+            ).identify()
+            float_tensors = {
+                f"transformer_blocks.0.{name}": tensor.float()
+                for name, tensor in _block_tensors(config).items()
+            }
+            save_file(float_tensors, checkpoint)
+            dtype_changed, _, _ = PackedWeightCache(
+                checkpoint, config, 0, 1, root / "cache"
+            ).identify()
+            shape_tensors = _block_tensors(config)
+            shape_tensors["attn1.to_q.weight"] = torch.zeros(
+                config.hidden_size + 1,
+                config.hidden_size,
+                dtype=torch.bfloat16,
+            )
+            save_file(
+                {
+                    f"transformer_blocks.0.{name}": tensor
+                    for name, tensor in shape_tensors.items()
+                },
+                checkpoint,
+            )
+            shape_changed, _, _ = PackedWeightCache(
+                checkpoint, config, 0, 1, root / "cache"
+            ).identify()
+            _save_blocks(checkpoint, config)
+            with mock.patch(
+                "anima_xdna_poc.weight_cache.tool_identity",
+                return_value={"triton_xdna": "different"},
+            ):
+                tool_changed, _, _ = cache.identify()
+            with mock.patch(
+                "anima_xdna_poc.weight_cache.LAYOUT_VERSION",
+                "different-layout",
+            ):
+                layout_changed, _, _ = cache.identify()
+        self.assertNotEqual(key, changed)
+        self.assertNotEqual(key, dtype_changed)
+        self.assertNotEqual(key, shape_changed)
+        self.assertNotEqual(key, tool_changed)
+        self.assertNotEqual(key, layout_changed)
+
+    def test_build_open_matches_prepare_and_exact_prune(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config)
+            cache = PackedWeightCache(checkpoint, config, 0, 1, root / "cache")
+            status = cache.open()
+            source = load_block_weights(checkpoint, config)
+            inputs = torch.ones(3, config.hidden_size, dtype=torch.bfloat16)
+            cached = cache.prepared(
+                0, "attn1.to_q.weight", 0, inputs, config.hidden_size
+            )
+            regular = prepare_linear(inputs, source["attn1.to_q.weight"])
+            self.assertTrue(
+                torch.equal(cached.weight_k_n_bf16, regular.weight_k_n_bf16)
+            )
+            self.assertGreater(status.padding_bytes, 0)
+            del cached
+            del regular
+            cache.close()
+            removed = cache.prune()
+            self.assertFalse(removed.exists())
+            self.assertTrue(root.exists())
+
+    def test_corrupt_payload_and_manifest_are_rejected(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config)
+            cache = PackedWeightCache(checkpoint, config, 0, 1, root / "cache")
+            status = cache.ensure()
+            payload = status.path / "weights.bin"
+            payload.write_bytes(payload.read_bytes()[:-1])
+            with self.assertRaisesRegex(CacheIntegrityError, "size mismatch"):
+                cache.ensure()
+            status = cache.ensure(rebuild=True)
+            manifest_path = status.path / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["cache_key"] = "wrong"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(CacheIntegrityError, "key mismatch"):
+                cache.ensure()
+
+    def test_atomic_failure_cleans_temporary_entry(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            cache_root = root / "cache"
+            _save_blocks(checkpoint, config)
+            cache = PackedWeightCache(checkpoint, config, 0, 1, cache_root)
+            real_replace = os.replace
+
+            def fail_directory_replace(source, destination):
+                if Path(source).is_dir():
+                    raise OSError("injected atomic failure")
+                return real_replace(source, destination)
+
+            with mock.patch(
+                "anima_xdna_poc.weight_cache.os.replace",
+                side_effect=fail_directory_replace,
+            ):
+                with self.assertRaisesRegex(OSError, "injected"):
+                    cache.ensure()
+            self.assertEqual(
+                [path for path in cache_root.iterdir() if path.name.startswith(".")],
+                [],
+            )
+
+    def test_concurrent_build_has_one_atomic_winner(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config)
+            results = []
+            errors = []
+
+            def build():
+                try:
+                    results.append(
+                        PackedWeightCache(
+                            checkpoint, config, 0, 1, root / "cache"
+                        ).ensure()
+                    )
+                except Exception as error:
+                    errors.append(error)
+
+            threads = [threading.Thread(target=build) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(sum(status.hit for status in results), 1)
+            self.assertEqual(len({status.key for status in results}), 1)
+
+    def test_disabled_mode_creates_nothing(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.safetensors"
+            _save_blocks(checkpoint, config)
+            cache_root = root / "cache"
+            status = PackedWeightCache(
+                checkpoint,
+                config,
+                0,
+                1,
+                cache_root,
+                enabled=False,
+            ).ensure()
+            self.assertEqual(status.reason, "disabled")
+            self.assertFalse(cache_root.exists())
+
+    def test_shard_index_fingerprints_every_file_and_builds_once(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tensors = {
+                f"transformer_blocks.0.{name}": tensor
+                for name, tensor in _block_tensors(config).items()
+            }
+            keys = sorted(tensors)
+            first_keys = keys[: len(keys) // 2]
+            second_keys = keys[len(keys) // 2 :]
+            first_name = "model-00001-of-00002.safetensors"
+            second_name = "model-00002-of-00002.safetensors"
+            save_file({key: tensors[key] for key in first_keys}, root / first_name)
+            save_file({key: tensors[key] for key in second_keys}, root / second_name)
+            index = root / "model.safetensors.index.json"
+            index.write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            **{key: first_name for key in first_keys},
+                            **{key: second_name for key in second_keys},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cache = PackedWeightCache(index, config, 0, 1, root / "cache")
+            status = cache.ensure()
+            self.assertEqual(
+                len(cache.manifest["descriptor"]["source_identity"]["files"]),
+                2,
+            )
+            self.assertEqual(status.tensor_count, 20)
 
 
 class XDNAPocUnitTests(unittest.TestCase):
@@ -373,11 +640,21 @@ class XDNAPocIntegrationTest(unittest.TestCase):
         with AnimaXDNAChainRuntime(
             checkpoint,
             cache_host_weights=False,
+            weight_cache=True,
         ) as runtime:
             validation = runtime.validate_range(inputs)
             steady = runtime.run_range(inputs)
+            cache_status = runtime.cache_status
+        with AnimaXDNAChainRuntime(
+            checkpoint,
+            cache_host_weights=False,
+            weight_cache=False,
+        ) as runtime:
+            uncached = runtime.run_range(inputs)
         self.assertEqual(validation.xdna.dispatch_count, 23 * 28)
         self.assertEqual(steady.dispatch_count, 23 * 28)
+        self.assertTrue(cache_status.hit)
+        self.assertTrue(torch.equal(steady.output, uncached.output))
         self.assertLess(
             max(error.normalized_rms_error for error in validation.errors),
             0.05,

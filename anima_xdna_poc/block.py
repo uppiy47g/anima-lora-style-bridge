@@ -14,7 +14,9 @@ from .errors import NumericalMismatch, PrototypeError, UnsupportedTensor
 from .linear import cpu_linear, prepare_linear
 
 
-LinearRunner = Callable[[str, torch.Tensor, torch.Tensor], torch.Tensor]
+LinearRunner = Callable[
+    [str, torch.Tensor, torch.Tensor, Optional[str]], torch.Tensor
+]
 BatchedRunner = Callable[[str, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
@@ -44,6 +46,8 @@ class StageMetric:
     h2d_sync_ms: float = 0.0
     kernel_sync_ms: float = 0.0
     d2h_sync_ms: float = 0.0
+    weight_population_ms: float = 0.0
+    weight_population_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -189,7 +193,12 @@ class _BlockExecution:
         rows = inputs.numel() // inputs.shape[-1]
         started = time.perf_counter()
         try:
-            result = self.runner(name, inputs, weight)
+            result = self.runner(
+                name,
+                inputs,
+                weight,
+                None if isinstance(weight_name, _AttentionWeight) else weight_name,
+            )
         except PrototypeError as error:
             raise type(error)(f"{name}: {error}") from error
         elapsed = (time.perf_counter() - started) * 1000
@@ -211,6 +220,8 @@ class _BlockExecution:
                 getattr(self.runner, "last_h2d_sync_ms", 0.0),
                 getattr(self.runner, "last_kernel_sync_ms", 0.0),
                 getattr(self.runner, "last_d2h_sync_ms", 0.0),
+                getattr(self.runner, "last_weight_population_ms", 0.0),
+                getattr(self.runner, "last_weight_population_bytes", 0),
             )
         )
         return result
@@ -369,6 +380,8 @@ class _BlockExecution:
                 getattr(self.batched_runner, "last_h2d_sync_ms", 0.0),
                 getattr(self.batched_runner, "last_kernel_sync_ms", 0.0),
                 getattr(self.batched_runner, "last_d2h_sync_ms", 0.0),
+                getattr(self.batched_runner, "last_weight_population_ms", 0.0),
+                getattr(self.batched_runner, "last_weight_population_bytes", 0),
             )
         )
         return result
@@ -434,7 +447,12 @@ def run_cpu_block(
 ) -> BlockResult:
     _validate_inputs(config, inputs)
 
-    def runner(name: str, value: torch.Tensor, weight) -> torch.Tensor:
+    def runner(
+        name: str,
+        value: torch.Tensor,
+        weight,
+        weight_name: Optional[str],
+    ) -> torch.Tensor:
         return _cpu_runner(name, value, weight)
 
     return _BlockExecution(config, weights, runner, "host").run(inputs)
@@ -447,6 +465,8 @@ def run_xdna_block(
     session=None,
     resident_key: Optional[str] = None,
     batched_attention: bool = True,
+    packed_cache=None,
+    block_index: Optional[int] = None,
 ) -> BlockResult:
     _validate_inputs(config, inputs)
     from .xdna import XDNASession
@@ -454,7 +474,12 @@ def run_xdna_block(
     caches: set[str] = set()
     session_scope = XDNASession() if session is None else nullcontext(session)
     with session_scope as active_session:
-        def runner(name: str, value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        def runner(
+            name: str,
+            value: torch.Tensor,
+            weight: torch.Tensor,
+            weight_name: Optional[str],
+        ) -> torch.Tensor:
             shape = value.shape
             flattened = value.reshape(-1, shape[-1])
             partials = []
@@ -472,10 +497,23 @@ def run_xdna_block(
                         operation_key,
                     )
                 else:
-                    prepared = prepare_linear(
-                        flattened[:, start:end],
-                        weight[:, start:end],
-                    )
+                    if (
+                        packed_cache is not None
+                        and block_index is not None
+                        and weight_name is not None
+                    ):
+                        prepared = packed_cache.prepared(
+                            block_index,
+                            weight_name,
+                            start,
+                            flattened[:, start:end],
+                            weight.shape[0],
+                        )
+                    else:
+                        prepared = prepare_linear(
+                            flattened[:, start:end],
+                            weight[:, start:end],
+                        )
                     if resident_key is not None and hasattr(
                         active_session, "dispatch_resident"
                     ):
@@ -502,6 +540,8 @@ def run_xdna_block(
                 "h2d_sync_ms",
                 "kernel_sync_ms",
                 "d2h_sync_ms",
+                "weight_population_ms",
+                "weight_population_bytes",
             ):
                 setattr(runner, "last_" + field, sum(getattr(p, field) for p in profiles))
             runner.last_resident_hits = sum(p.resident_hit for p in profiles)
@@ -539,6 +579,8 @@ def run_xdna_block(
                 "h2d_sync_ms",
                 "kernel_sync_ms",
                 "d2h_sync_ms",
+                "weight_population_ms",
+                "weight_population_bytes",
             ):
                 setattr(batched_runner, "last_" + field, getattr(dispatched, field))
             batched_runner.last_resident_hits = int(dispatched.resident_hit)

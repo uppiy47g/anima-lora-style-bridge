@@ -44,6 +44,7 @@ anima-xdna-probe = "anima_xdna_poc.cli:probe_main"
 anima-xdna-linear = "anima_xdna_poc.cli:linear_main"
 anima-xdna-block = "anima_xdna_poc.cli:block_main"
 anima-xdna-chain = "anima_xdna_poc.cli:chain_main"
+anima-xdna-cache = "anima_xdna_poc.cli:cache_main"
 
 [tool.setuptools]
 py-modules = ["anima_style_bridge"]

@@ -51,6 +51,8 @@ class DispatchResult:
     h2d_sync_ms: float = 0.0
     kernel_sync_ms: float = 0.0
     d2h_sync_ms: float = 0.0
+    weight_population_ms: float = 0.0
+    weight_population_bytes: int = 0
 
 
 def _imports() -> tuple[Any, Any, Any, Any]:
@@ -404,6 +406,8 @@ class _ResidentKernelRunner:
         h2d_bytes = 0
         copy_ms = 0.0
         h2d_sync_ms = 0.0
+        weight_population_ms = 0.0
+        weight_population_bytes = 0
         for index, array in enumerate(arrays):
             if index in scratch_indices:
                 continue
@@ -413,13 +417,18 @@ class _ResidentKernelRunner:
             source = np.frombuffer(array, dtype=np.uint8)
             target = np.frombuffer(bos[index].map(), dtype=np.uint8, count=len(source))
             np.copyto(target, source, casting="no")
-            copy_ms += (time.perf_counter() - started) * 1000
+            copied_ms = (time.perf_counter() - started) * 1000
+            copy_ms += copied_ms
             started = time.perf_counter()
             bos[index].sync(
                 self.xrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE
             )
-            h2d_sync_ms += (time.perf_counter() - started) * 1000
+            synced_ms = (time.perf_counter() - started) * 1000
+            h2d_sync_ms += synced_ms
             h2d_bytes += sizes[index]
+            if index in static_indices:
+                weight_population_ms += copied_ms + synced_ms
+                weight_population_bytes += sizes[index]
 
         started = time.perf_counter()
         run = self.xrt.run(self.kernel)
@@ -450,6 +459,8 @@ class _ResidentKernelRunner:
             "h2d_sync_ms": h2d_sync_ms,
             "kernel_sync_ms": kernel_sync_ms,
             "d2h_sync_ms": d2h_sync_ms,
+            "weight_population_ms": weight_population_ms,
+            "weight_population_bytes": weight_population_bytes,
         }
 
     def close(self):
@@ -515,6 +526,8 @@ class ResidentXDNASession(XDNASession):
                 "h2d_sync_ms",
                 "kernel_sync_ms",
                 "d2h_sync_ms",
+                "weight_population_ms",
+                "weight_population_bytes",
             )},
         )
 

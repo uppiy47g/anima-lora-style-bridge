@@ -16,6 +16,7 @@ from .block_checkpoint import (
 from .checkpoint import LinearWeight, discover_linear_weight
 from .chain import AnimaXDNAChainRuntime, ChainResult, ChainValidation
 from .linear import PreparedLinear, cpu_linear, deterministic_input, prepare_linear
+from .weight_cache import CacheStatus, PackedWeightCache
 
 __all__ = [
     "AnimaBlockConfig",
@@ -27,6 +28,8 @@ __all__ = [
     "ChainValidation",
     "LinearWeight",
     "PreparedLinear",
+    "CacheStatus",
+    "PackedWeightCache",
     "cpu_linear",
     "deterministic_block_inputs",
     "deterministic_input",

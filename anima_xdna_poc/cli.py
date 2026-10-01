@@ -1,6 +1,7 @@
 """Command-line entry points for probing and validating one Anima Linear."""
 
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
@@ -51,14 +52,58 @@ def linear_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--rtol", type=float, default=1.6e-2)
     parser.add_argument("--atol", type=float)
+    parser.add_argument(
+        "--weight-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="use the shared full-model packed cache for a transformer block weight",
+    )
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--rebuild-cache", action="store_true")
     args = parser.parse_args(argv)
 
     try:
         selected = discover_linear_weight(args.checkpoint, args.key)
         inputs = deterministic_input(args.rows, selected.in_features, args.seed)
-        prepared = prepare_linear(inputs, selected.tensor)
+        cache = None
+        if args.weight_cache:
+            import re
+            from .block_checkpoint import load_block_config
+            from .weight_cache import PackedWeightCache
+
+            match = re.fullmatch(
+                r"transformer_blocks\.(\d+)\.(.+)",
+                selected.key,
+            )
+            if match is None or match.group(2) not in __import__(
+                "anima_xdna_poc.block_checkpoint",
+                fromlist=["LINEAR_SHAPES"],
+            ).LINEAR_SHAPES:
+                raise PrototypeError(
+                    "--weight-cache requires an exact transformer_blocks.N Linear key"
+                )
+            block_index = int(match.group(1))
+            cache = PackedWeightCache(
+                args.checkpoint,
+                load_block_config(args.checkpoint.parent),
+                0,
+                28,
+                args.cache_dir,
+            )
+            cache.open(args.rebuild_cache)
+            prepared = cache.prepared(
+                block_index,
+                match.group(2),
+                0,
+                inputs,
+                selected.out_features,
+            )
+        else:
+            prepared = prepare_linear(inputs, selected.tensor)
         reference = cpu_linear(prepared)
         result = execute(prepared, args.warmup, args.runs)
+        if cache is not None:
+            cache.close()
         atol = args.atol
         if atol is None:
             atol = 1.5e-3 * (8192 / prepared.input_bf16.shape[1]) ** 0.5
@@ -99,6 +144,14 @@ def linear_main(argv: list[str] | None = None) -> int:
                 "compile_and_first_run_ms": result.compile_and_first_run_ms,
                 "median_wall_run_ms": result.median_run_ms,
                 "artifact_cache": result.artifact_cache,
+                "weight_cache": (
+                    {
+                        **asdict(cache.status),
+                        "path": str(cache.status.path),
+                    }
+                    if cache is not None
+                    else {"reason": "disabled"}
+                ),
                 "rtol": args.rtol,
                 "atol": atol,
             },
@@ -125,6 +178,13 @@ def block_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--rtol", type=float, default=2e-2)
     parser.add_argument("--atol", type=float, default=3e-3)
+    parser.add_argument(
+        "--weight-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--rebuild-cache", action="store_true")
     args = parser.parse_args(argv)
     if args.runs <= 0:
         parser.error("--runs must be positive")
@@ -141,6 +201,14 @@ def block_main(argv: list[str] | None = None) -> int:
         config_path = args.config or args.checkpoint.parent / "config.json"
         config = load_block_config(config_path)
         weights = load_block_weights(args.checkpoint, config)
+        packed_cache = None
+        if args.weight_cache:
+            from .weight_cache import PackedWeightCache
+
+            packed_cache = PackedWeightCache(
+                args.checkpoint, config, 0, 28, args.cache_dir
+            )
+            packed_cache.open(args.rebuild_cache)
         inputs = deterministic_block_inputs(
             config,
             args.image_tokens,
@@ -151,7 +219,18 @@ def block_main(argv: list[str] | None = None) -> int:
         cpu_started = __import__("time").perf_counter()
         reference = run_cpu_block(config, weights, inputs)
         cpu_ms = (__import__("time").perf_counter() - cpu_started) * 1000
-        npu_runs = [run_xdna_block(config, weights, inputs) for _ in range(args.runs)]
+        npu_runs = [
+            run_xdna_block(
+                config,
+                weights,
+                inputs,
+                packed_cache=packed_cache,
+                block_index=0,
+            )
+            for _ in range(args.runs)
+        ]
+        if packed_cache is not None:
+            packed_cache.close()
         result = npu_runs[-1]
         max_error, mean_error = compare_block_outputs(
             result.output, reference.output, args.rtol, args.atol
@@ -179,6 +258,14 @@ def block_main(argv: list[str] | None = None) -> int:
         "status": "match",
         "model": "Anima Base v1.0 Diffusers / CosmosTransformer3DModel",
         "block": weights.prefix.rstrip("."),
+        "weight_cache": (
+            {
+                **asdict(packed_cache.status),
+                "path": str(packed_cache.status.path),
+            }
+            if packed_cache is not None
+            else {"reason": "disabled"}
+        ),
         "shape": {
             "batch": 1,
             "image_tokens": args.image_tokens,
@@ -233,6 +320,8 @@ def block_main(argv: list[str] | None = None) -> int:
                 "h2d_sync_ms": metric.h2d_sync_ms,
                 "kernel_sync_ms": metric.kernel_sync_ms,
                 "d2h_sync_ms": metric.d2h_sync_ms,
+                "weight_population_ms": metric.weight_population_ms,
+                "weight_population_bytes": metric.weight_population_bytes,
             }
             for metric in result.metrics
         ],
@@ -257,6 +346,14 @@ def chain_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--oracle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument(
+        "--weight-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use the verified local packed-weight cache",
+    )
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--rebuild-cache", action="store_true")
     args = parser.parse_args(argv)
     if args.warmups < 0 or args.runs <= 0:
         parser.error("--warmups must be non-negative and --runs must be positive")
@@ -269,6 +366,9 @@ def chain_main(argv: list[str] | None = None) -> int:
             args.checkpoint,
             args.config,
             cache_host_weights=False,
+            weight_cache=args.weight_cache,
+            cache_dir=args.cache_dir,
+            rebuild_cache=args.rebuild_cache,
         ) as runtime:
             if args.fixture:
                 captured = torch.load(args.fixture, map_location="cpu", weights_only=True)
@@ -328,6 +428,11 @@ def chain_main(argv: list[str] | None = None) -> int:
         for block in final.blocks
         for metric in block.result.metrics
     ]
+    populate_metrics = [
+        metric
+        for block in populated.blocks
+        for metric in block.result.metrics
+    ]
     errors = []
     if validation is not None:
         errors = [
@@ -350,6 +455,17 @@ def chain_main(argv: list[str] | None = None) -> int:
         "status": "match" if validation is not None else "executed_without_oracle",
         "input": input_kind,
         "block_range": [args.start_block, args.end_block],
+        "weight_cache": (
+            {
+                **asdict(runtime.cache_status),
+                "path": str(runtime.cache_status.path),
+            }
+            if runtime.cache_status is not None
+            else {
+                "hit": False,
+                "reason": "disabled",
+            }
+        ),
         "shape": {
             "batch": inputs.hidden_states.shape[0],
             "image_tokens": inputs.hidden_states.shape[1],
@@ -373,11 +489,38 @@ def chain_main(argv: list[str] | None = None) -> int:
                 metric.h2d_sync_ms + metric.d2h_sync_ms for metric in metrics
             ),
             "kernel_and_wait_ms": sum(metric.kernel_sync_ms for metric in metrics),
+            "weight_population_ms": sum(
+                metric.weight_population_ms for metric in metrics
+            ),
+            "weight_population_bytes": sum(
+                metric.weight_population_bytes for metric in metrics
+            ),
             "host_operations_ms": sum(
                 metric.wall_ms for metric in metrics if metric.device == "host"
             ),
             "npu_logical_flops": sum(
                 metric.estimated_flops for metric in metrics if metric.device == "xdna2"
+            ),
+        },
+        "populate_profile": {
+            "h2d_staging_bytes": sum(
+                metric.h2d_bytes for metric in populate_metrics
+            ),
+            "weight_population_ms": sum(
+                metric.weight_population_ms for metric in populate_metrics
+            ),
+            "weight_population_bytes": sum(
+                metric.weight_population_bytes for metric in populate_metrics
+            ),
+            "host_copy_ms": sum(
+                metric.host_copy_ms for metric in populate_metrics
+            ),
+            "cache_sync_ms": sum(
+                metric.h2d_sync_ms + metric.d2h_sync_ms
+                for metric in populate_metrics
+            ),
+            "kernel_and_wait_ms": sum(
+                metric.kernel_sync_ms for metric in populate_metrics
             ),
         },
         "block_wall_ms": [
@@ -397,4 +540,67 @@ def chain_main(argv: list[str] | None = None) -> int:
             for block in final.blocks
         ]
     print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cache_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Manage verified local Anima XDNA packed-weight cache entries"
+    )
+    parser.add_argument(
+        "action",
+        choices=("list", "inspect", "build", "verify", "rebuild", "prune"),
+    )
+    parser.add_argument("checkpoint", type=Path, nargs="?")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--start-block", type=int, default=0)
+    parser.add_argument("--end-block", type=int, default=28)
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--entry-key")
+    args = parser.parse_args(argv)
+
+    from .block_checkpoint import load_block_config
+    from .weight_cache import PackedWeightCache, list_entries, prune_entry
+
+    if args.action == "list":
+        print(json.dumps({"entries": list(list_entries(args.cache_dir))}, indent=2))
+        return 0
+    if args.action == "prune" and args.entry_key:
+        try:
+            path = prune_entry(args.entry_key, args.cache_dir)
+        except PrototypeError as error:
+            return _print_failure(error)
+        print(json.dumps({"status": "pruned", "path": str(path)}, indent=2))
+        return 0
+    if args.checkpoint is None:
+        parser.error("checkpoint is required for this action")
+    try:
+        cache = PackedWeightCache(
+            args.checkpoint,
+            load_block_config(args.config or args.checkpoint.parent),
+            args.start_block,
+            args.end_block,
+            args.cache_dir,
+        )
+        if args.action == "prune":
+            path = cache.prune()
+            result = {"status": "pruned", "path": str(path)}
+        else:
+            if args.action in ("inspect", "verify"):
+                key, _, _ = cache.identify()
+                if not cache.entry_path(key).is_dir():
+                    from .weight_cache import CacheIntegrityError
+
+                    raise CacheIntegrityError(
+                        f"cache entry does not exist: {cache.entry_path(key)}"
+                    )
+            status = cache.ensure(rebuild=args.action == "rebuild")
+            result = {
+                "status": "ready",
+                **asdict(status),
+                "path": str(status.path),
+            }
+    except PrototypeError as error:
+        return _print_failure(error)
+    print(json.dumps(result, indent=2))
     return 0

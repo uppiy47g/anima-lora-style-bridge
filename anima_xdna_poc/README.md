@@ -20,10 +20,11 @@ implementation used by Anima Base v1.0 (`diffusers 0.39.0.dev0`):
 4. MLP: exact GELU (`approximate="none"`) with 2048->8192->2048 projections.
 5. A gated residual follows each attention and MLP stage.
 
-The loader validates all 20 block tensors and materializes only those tensors
-through `safetensors.safe_open`; the rest of the 3.9 GB checkpoint is not
-loaded. The original checkpoint remains the source of truth. Native Triton
-cache entries contain only compiled kernels and layout metadata.
+The loader validates all 20 block tensors and materializes only requested
+tensors through `safetensors.safe_open`. The original checkpoint remains the
+read-only source of truth. Native Triton cache entries contain compiled
+kernels; the separate packed-weight cache described below is a verified,
+regenerable local derivative and is never a replacement model.
 
 Positive compatibility is currently limited to the full **Anima Base v1.0
 Diffusers** checkpoint. Locally discovered Aesthetic and Turbo files are LoRA
@@ -121,6 +122,9 @@ anima-xdna-block D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
 anima-xdna-chain D:\models\Anima\transformer\diffusion_pytorch_model.safetensors `
   --fixture C:\captures\anima-real-preblock.pt `
   --start-block 0 --end-block 28 --warmups 1 --runs 3 --profile
+anima-xdna-cache build D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
+anima-xdna-cache verify D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
+anima-xdna-cache list
 ```
 
 `anima-xdna-probe` must report `target: npu2` and `runtime: xrt`.
@@ -174,6 +178,86 @@ installed Diffusers 0.39.0 authoritative 28-block chain and ended at about
 Failures use distinct categories and exit codes: dependency unavailable (2),
 NPU unavailable (3), unsupported shape/config/dtype (4), compilation failure
 (5), execution failure (6), and numerical mismatch (7).
+
+## Packed-weight cache
+
+The default cache is
+`%USERPROFILE%\.cache\anima-xdna\weights\<cache-key>`. It stores the exact BF16
+K-by-N tensors consumed by the AIE2P Linear kernels after transpose, K-chunking,
+zero-padding, and layout preparation, plus the four small Q/K RMSNorm vectors
+per block. It does not copy or bundle the source safetensors and is not a
+portable or distributable model format. The cache may be deleted and rebuilt
+at any time; model privacy and license obligations still apply to the original
+checkpoint.
+
+The human-readable `manifest.json` records:
+
+- a full SHA-256 content fingerprint of every used tensor byte range, every
+  safetensors header, and a shard index when present;
+- model family, complete architecture, block range, and exact weight-key map;
+- source/packed dtype and shape, offsets, padding, K-chunking, and layout ABI;
+- `base_model_fingerprint`, future `adapter_fingerprints`, `merge_strength`,
+  `quantization_scheme`, and `layout_version` namespace fields;
+- Triton-XDNA, MLIR-AIE/AIR, LLVM-AIE, XRT SDK, `npu2`, and PoC cache ABI;
+- one payload SHA-256 and a SHA-256 for every packed tensor record.
+
+A warm hit verifies Windows file identity/change-time/size, all headers, and
+three distributed byte ranges in every used source tensor. The full content
+hash established at build remains in the cache key. It concurrently verifies
+the complete 3.96 GB payload SHA-256 before mmap. Any guard, header, range,
+manifest, size, or digest mismatch is a miss or explicit integrity failure;
+corrupt entries are never loaded silently. Builds use an exclusive
+per-key lock, write into a unique temporary directory, fsync the payload, and
+atomically rename the completed directory. Failed builds clean only their own
+temporary directory.
+
+`anima-xdna-chain` enables the cache by default. Use `--no-weight-cache`,
+`--cache-dir PATH`, or `--rebuild-cache` to disable, relocate, or explicitly
+regenerate it. `anima-xdna-block` has the same switches.
+`anima-xdna-linear --weight-cache` reuses the full entry for exact
+`transformer_blocks.N.*` Linear keys. Management commands are:
+
+```powershell
+anima-xdna-cache inspect CHECKPOINT
+anima-xdna-cache verify CHECKPOINT
+anima-xdna-cache rebuild CHECKPOINT
+anima-xdna-cache list
+anima-xdna-cache prune CHECKPOINT
+anima-xdna-cache prune --entry-key <64-hex-cache-key>
+```
+
+`prune` resolves and verifies one exact manifest entry; it never recursively
+deletes a wildcard or the cache root. Payload pages are memory-mapped and
+copied into process-local XRT BOs. BO handles/device pointers are never
+persisted. CLI timings keep fingerprint/guard validation, packing, mmap,
+payload verification, and BO population separate.
+
+For Anima Base v1.0 blocks 0-27 the final entry contains 644 unique records:
+532 Linear K-chunks and 112 RMSNorm tensors. It occupies 3,963,645,952 bytes
+for 3,875,565,568 logical source bytes; zero padding adds 88,080,384 bytes
+(2.27%). Measurements on the validated system were:
+
+| Phase | Time |
+|---|---:|
+| cache disabled, cold prepare | 10.089 s |
+| cache disabled, OS-warm prepare | 5.355-5.538 s |
+| clean cold fingerprint | 5.528-5.758 s |
+| clean cold pack/write | 13.409-13.671 s |
+| clean cold total | 19.834-19.865 s |
+| new-process warm source validation | 34-42 ms |
+| new-process warm payload verification | 4.316-4.529 s |
+| new-process warm total | 4.330-4.546 s |
+
+The full first-run 28-block path, including verification, BO population,
+kernel execution, and host stages, fell from 23.822 s without the cache to
+21.843 s with a verified warm hit. The first resident upload copied
+3,963,617,280 packed Linear bytes into weight BOs and measured 516.8 ms without
+the cache versus 631.0 ms from mmap-backed payload pages in the compared runs;
+the cache removes source transpose/padding, not BO upload. Once resident, both
+paths reuse the same BOs and have identical transfer behavior. Cached and
+uncached 28-block XDNA outputs were bitwise equal, and the existing Diffusers/
+CPU normalized-RMS gate continued to pass. Times vary with OS file-cache state;
+cold build time is intentionally not presented as warm-hit performance.
 
 ## Tests and limitations
 

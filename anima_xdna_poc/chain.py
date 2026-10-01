@@ -17,6 +17,7 @@ from .block_checkpoint import (
 )
 from .errors import NumericalMismatch, UnsupportedTensor
 from .xdna import ResidentXDNASession
+from .weight_cache import CacheStatus, PackedWeightCache
 
 
 @dataclass(frozen=True)
@@ -65,14 +66,22 @@ class AnimaXDNAChainRuntime:
         checkpoint: Path,
         config: Optional[Path] = None,
         cache_host_weights: bool = True,
+        weight_cache: bool = True,
+        cache_dir: Optional[Path] = None,
+        rebuild_cache: bool = False,
     ):
         self.checkpoint = Path(checkpoint)
         self.config: AnimaBlockConfig = load_block_config(
             config or self.checkpoint.parent
         )
         self.cache_host_weights = cache_host_weights
+        self.weight_cache_enabled = weight_cache
+        self.cache_dir = cache_dir
+        self.rebuild_cache = rebuild_cache
         self._weights: dict[int, AnimaBlockWeights] = {}
         self._session: Optional[ResidentXDNASession] = None
+        self._packed_cache: Optional[PackedWeightCache] = None
+        self.cache_status: Optional[CacheStatus] = None
 
     def __enter__(self):
         if self._session is not None:
@@ -85,17 +94,40 @@ class AnimaXDNAChainRuntime:
         if self._session is not None:
             self._session.__exit__(None, None, None)
             self._session = None
+        if self._packed_cache is not None:
+            self._packed_cache.close()
+            self._packed_cache = None
         self._weights.clear()
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._session is not None:
             self._session.__exit__(exc_type, exc_value, traceback)
             self._session = None
+        if self._packed_cache is not None:
+            self._packed_cache.close()
+            self._packed_cache = None
         self._weights.clear()
 
-    def weights(self, index: int) -> AnimaBlockWeights:
+    def _ensure_packed_cache(self, start: int, end: int) -> None:
+        if not self.weight_cache_enabled:
+            return
+        if self._packed_cache is not None:
+            return
+        cache = PackedWeightCache(
+            self.checkpoint,
+            self.config,
+            0,
+            28,
+            self.cache_dir,
+        )
+        self.cache_status = cache.open(self.rebuild_cache)
+        self._packed_cache = cache
+
+    def weights(self, index: int, source: bool = False) -> AnimaBlockWeights:
         if not 0 <= index < 28:
             raise UnsupportedTensor(f"block index must be in [0, 27], got {index}")
+        if self._packed_cache is not None and not source:
+            return self._packed_cache.block_weights(index)
         loaded = self._weights.get(index)
         if loaded is None:
             loaded = load_block_weights(self.checkpoint, self.config, index)
@@ -147,6 +179,7 @@ class AnimaXDNAChainRuntime:
         self._validate_range(start, end)
         if self._session is None:
             raise RuntimeError("AnimaXDNAChainRuntime must be entered before execution")
+        self._ensure_packed_cache(start, end)
         hidden = inputs.hidden_states
         profiles = []
         for index in range(start, end):
@@ -159,11 +192,14 @@ class AnimaXDNAChainRuntime:
                 block_inputs,
                 session=self._session,
                 resident_key=f"block{index}",
+                packed_cache=self._packed_cache,
+                block_index=index,
             )
             wall_ms = (time.perf_counter() - started) * 1000
             hidden = result.output
             profiles.append(ChainBlockProfile(index, wall_ms, result))
-            self._retain_resident_metadata(index, weights)
+            if self._packed_cache is None:
+                self._retain_resident_metadata(index, weights)
         return ChainResult(hidden, tuple(profiles))
 
     def run_cpu_range(
@@ -178,7 +214,9 @@ class AnimaXDNAChainRuntime:
         for index in range(start, end):
             block_inputs = self._next_inputs(inputs, hidden)
             started = time.perf_counter()
-            result = run_cpu_block(self.config, self.weights(index), block_inputs)
+            result = run_cpu_block(
+                self.config, self.weights(index, source=True), block_inputs
+            )
             wall_ms = (time.perf_counter() - started) * 1000
             hidden = result.output
             profiles.append(ChainBlockProfile(index, wall_ms, result))
@@ -194,6 +232,7 @@ class AnimaXDNAChainRuntime:
         self._validate_range(start, end)
         if self._session is None:
             raise RuntimeError("AnimaXDNAChainRuntime must be entered before execution")
+        self._ensure_packed_cache(start, end)
         cpu_hidden = inputs.hidden_states
         xdna_hidden = inputs.hidden_states
         cpu_profiles = []
@@ -202,7 +241,7 @@ class AnimaXDNAChainRuntime:
         for index in range(start, end):
             cpu_inputs = self._next_inputs(inputs, cpu_hidden)
             xdna_inputs = self._next_inputs(inputs, xdna_hidden)
-            weights = self.weights(index)
+            weights = self.weights(index, source=True)
             started = time.perf_counter()
             cpu_result = run_cpu_block(self.config, weights, cpu_inputs)
             cpu_ms = (time.perf_counter() - started) * 1000
@@ -213,6 +252,8 @@ class AnimaXDNAChainRuntime:
                 xdna_inputs,
                 session=self._session,
                 resident_key=f"block{index}",
+                packed_cache=self._packed_cache,
+                block_index=index,
             )
             xdna_ms = (time.perf_counter() - started) * 1000
             cpu_hidden = cpu_result.output
@@ -233,7 +274,8 @@ class AnimaXDNAChainRuntime:
             )
             cpu_profiles.append(ChainBlockProfile(index, cpu_ms, cpu_result))
             xdna_profiles.append(ChainBlockProfile(index, xdna_ms, xdna_result))
-            self._retain_resident_metadata(index, weights)
+            if self._packed_cache is None:
+                self._retain_resident_metadata(index, weights)
         worst = max(errors, key=lambda item: item.normalized_rms_error)
         if worst.normalized_rms_error > max_normalized_rms_error:
             raise NumericalMismatch(
