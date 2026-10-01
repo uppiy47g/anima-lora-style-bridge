@@ -1,6 +1,7 @@
 """Faithful one-block Anima/Cosmos CPU oracle and XDNA adapter."""
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import math
 import time
 from typing import Any, Callable, Optional, Union
@@ -14,6 +15,7 @@ from .linear import cpu_linear, prepare_linear
 
 
 LinearRunner = Callable[[str, torch.Tensor, torch.Tensor], torch.Tensor]
+BatchedRunner = Callable[[str, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,14 @@ class StageMetric:
     dispatches: int
     estimated_flops: int
     transfer_bytes: int
+    h2d_bytes: int = 0
+    d2h_bytes: int = 0
+    allocation_count: int = 0
+    resident_hits: int = 0
+    host_copy_ms: float = 0.0
+    h2d_sync_ms: float = 0.0
+    kernel_sync_ms: float = 0.0
+    d2h_sync_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -148,11 +158,13 @@ class _BlockExecution:
         weights: AnimaBlockWeights,
         runner: LinearRunner,
         runner_device: str,
+        batched_runner: Optional[BatchedRunner] = None,
     ):
         self.config = config
         self.weights = weights
         self.runner = runner
         self.runner_device = runner_device
+        self.batched_runner = batched_runner
         self.metrics: list[StageMetric] = []
 
     def host(self, name: str, operation: Callable[[], Any]) -> Any:
@@ -191,6 +203,14 @@ class _BlockExecution:
                 getattr(self.runner, "last_dispatches", 1),
                 flops,
                 transfer,
+                getattr(self.runner, "last_h2d_bytes", 0),
+                getattr(self.runner, "last_d2h_bytes", 0),
+                getattr(self.runner, "last_allocation_count", 0),
+                getattr(self.runner, "last_resident_hits", 0),
+                getattr(self.runner, "last_host_copy_ms", 0.0),
+                getattr(self.runner, "last_h2d_sync_ms", 0.0),
+                getattr(self.runner, "last_kernel_sync_ms", 0.0),
+                getattr(self.runner, "last_d2h_sync_ms", 0.0),
             )
         )
         return result
@@ -259,19 +279,27 @@ class _BlockExecution:
             query = self.host(prefix + ".q_rope", lambda: apply_rope(query))
             key = self.host(prefix + ".k_rope", lambda: apply_rope(key))
 
-        score_heads = []
         scale = cfg.head_dim**-0.5
-        for head in range(cfg.num_heads):
-            scores = self.linear(
-                f"{prefix}.qk.head{head}",
-                query[:, head],
-                _AttentionWeight(key[:, head].squeeze(0)),
+        if self.batched_runner is None:
+            score_heads = []
+            for head in range(cfg.num_heads):
+                scores = self.linear(
+                    f"{prefix}.qk.head{head}",
+                    query[:, head],
+                    _AttentionWeight(key[:, head].squeeze(0)),
+                )
+                score_heads.append(scores)
+            scores = self.host(
+                prefix + ".qk_scale_stack",
+                lambda: torch.stack(score_heads, dim=1) * scale,
             )
-            score_heads.append(scores)
-        scores = self.host(
-            prefix + ".qk_scale_stack",
-            lambda: torch.stack(score_heads, dim=1) * scale,
-        )
+        else:
+            scores = self.batched(
+                prefix + ".qk_batched",
+                query.squeeze(0),
+                key.squeeze(0).transpose(1, 2),
+            ).unsqueeze(0)
+            scores = self.host(prefix + ".qk_scale", lambda: scores * scale)
         if mask is not None:
             scores = self.host(
                 prefix + ".mask",
@@ -281,22 +309,69 @@ class _BlockExecution:
             prefix + ".softmax",
             lambda: torch.softmax(scores.float(), dim=-1).to(torch.bfloat16),
         )
-        output_heads = []
-        for head in range(cfg.num_heads):
-            output_heads.append(
-                self.linear(
-                    f"{prefix}.av.head{head}",
-                    probabilities[:, head],
-                    _AttentionWeight(value[:, head].transpose(1, 2).squeeze(0)),
+        if self.batched_runner is None:
+            output_heads = []
+            for head in range(cfg.num_heads):
+                output_heads.append(
+                    self.linear(
+                        f"{prefix}.av.head{head}",
+                        probabilities[:, head],
+                        _AttentionWeight(value[:, head].transpose(1, 2).squeeze(0)),
+                    )
                 )
+            attended = self.host(
+                prefix + ".av_layout",
+                lambda: torch.stack(output_heads, dim=1)
+                .transpose(1, 2)
+                .reshape(1, hidden.shape[1], cfg.hidden_size),
             )
-        attended = self.host(
-            prefix + ".av_layout",
-            lambda: torch.stack(output_heads, dim=1)
-            .transpose(1, 2)
-            .reshape(1, hidden.shape[1], cfg.hidden_size),
-        )
+        else:
+            output = self.batched(
+                prefix + ".av_batched",
+                probabilities.squeeze(0),
+                value.squeeze(0),
+            )
+            attended = self.host(
+                prefix + ".av_layout",
+                lambda: output.transpose(0, 1).reshape(
+                    1, hidden.shape[1], cfg.hidden_size
+                ),
+            )
         return self.linear(prefix + ".out", attended, prefix + ".to_out.0.weight")
+
+    def batched(
+        self,
+        name: str,
+        inputs: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        started = time.perf_counter()
+        try:
+            result = self.batched_runner(name, inputs, weights)
+        except PrototypeError as error:
+            raise type(error)(f"{name}: {error}") from error
+        elapsed = (time.perf_counter() - started) * 1000
+        heads, rows, inner = inputs.shape
+        columns = weights.shape[-1]
+        self.metrics.append(
+            StageMetric(
+                name,
+                self.runner_device,
+                elapsed,
+                1,
+                2 * heads * rows * inner * columns,
+                (inputs.numel() + weights.numel() + result.numel()) * 2,
+                getattr(self.batched_runner, "last_h2d_bytes", 0),
+                getattr(self.batched_runner, "last_d2h_bytes", 0),
+                getattr(self.batched_runner, "last_allocation_count", 0),
+                getattr(self.batched_runner, "last_resident_hits", 0),
+                getattr(self.batched_runner, "last_host_copy_ms", 0.0),
+                getattr(self.batched_runner, "last_h2d_sync_ms", 0.0),
+                getattr(self.batched_runner, "last_kernel_sync_ms", 0.0),
+                getattr(self.batched_runner, "last_d2h_sync_ms", 0.0),
+            )
+        )
+        return result
 
     def run(self, inputs: BlockInputs) -> BlockResult:
         hidden = inputs.hidden_states
@@ -369,28 +444,113 @@ def run_xdna_block(
     config: AnimaBlockConfig,
     weights: AnimaBlockWeights,
     inputs: BlockInputs,
+    session=None,
+    resident_key: Optional[str] = None,
+    batched_attention: bool = True,
 ) -> BlockResult:
     _validate_inputs(config, inputs)
     from .xdna import XDNASession
 
     caches: set[str] = set()
-    with XDNASession() as session:
-        def runner(_: str, value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    session_scope = XDNASession() if session is None else nullcontext(session)
+    with session_scope as active_session:
+        def runner(name: str, value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
             shape = value.shape
             flattened = value.reshape(-1, shape[-1])
             partials = []
+            profiles = []
             for start in range(0, shape[-1], 2048):
                 end = min(start + 2048, shape[-1])
-                prepared = prepare_linear(flattened[:, start:end], weight[:, start:end])
-                dispatched = session.dispatch(prepared)
-                partials.append(dispatched.output_fp32)
+                operation_key = f"{resident_key}:{name}:k{start}"
+                if (
+                    resident_key is not None
+                    and hasattr(active_session, "has_resident")
+                    and active_session.has_resident(operation_key)
+                ):
+                    dispatched = active_session.dispatch_resident_input(
+                        flattened[:, start:end],
+                        operation_key,
+                    )
+                else:
+                    prepared = prepare_linear(
+                        flattened[:, start:end],
+                        weight[:, start:end],
+                    )
+                    if resident_key is not None and hasattr(
+                        active_session, "dispatch_resident"
+                    ):
+                        dispatched = active_session.dispatch_resident(
+                            prepared,
+                            operation_key,
+                        )
+                    else:
+                        dispatched = active_session.dispatch(prepared)
+                partials.append(
+                    dispatched.output_fp32.clone()
+                    if shape[-1] > 2048
+                    else dispatched.output_fp32
+                )
+                profiles.append(dispatched)
                 if dispatched.artifact_cache:
                     caches.add(dispatched.artifact_cache)
             runner.last_dispatches = len(partials)
+            for field in (
+                "h2d_bytes",
+                "d2h_bytes",
+                "allocation_count",
+                "host_copy_ms",
+                "h2d_sync_ms",
+                "kernel_sync_ms",
+                "d2h_sync_ms",
+            ):
+                setattr(runner, "last_" + field, sum(getattr(p, field) for p in profiles))
+            runner.last_resident_hits = sum(p.resident_hit for p in profiles)
             output = torch.stack(partials).sum(dim=0).to(torch.bfloat16)
             return output.reshape(*shape[:-1], weight.shape[0])
 
-        result = _BlockExecution(config, weights, runner, "xdna2").run(inputs)
+        def batched_runner(
+            _: str,
+            value: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
+            if hasattr(active_session, "dispatch_head_chain"):
+                dispatched = active_session.dispatch_head_chain(
+                    value,
+                    weight,
+                    f"{resident_key or 'block'}:{_}",
+                )
+            elif resident_key is not None and hasattr(
+                active_session, "dispatch_batched_resident"
+            ):
+                dispatched = active_session.dispatch_batched_resident(
+                    value,
+                    weight,
+                    f"{resident_key}:{_}",
+                )
+            else:
+                dispatched = active_session.dispatch_batched(value, weight)
+            if dispatched.artifact_cache:
+                caches.add(dispatched.artifact_cache)
+            for field in (
+                "h2d_bytes",
+                "d2h_bytes",
+                "allocation_count",
+                "host_copy_ms",
+                "h2d_sync_ms",
+                "kernel_sync_ms",
+                "d2h_sync_ms",
+            ):
+                setattr(batched_runner, "last_" + field, getattr(dispatched, field))
+            batched_runner.last_resident_hits = int(dispatched.resident_hit)
+            return dispatched.output_bf16
+
+        result = _BlockExecution(
+            config,
+            weights,
+            runner,
+            "xdna2",
+            batched_runner if batched_attention else None,
+        ).run(inputs)
     return BlockResult(
         result.output,
         result.metrics,

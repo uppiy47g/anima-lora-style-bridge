@@ -22,6 +22,7 @@ from anima_xdna_poc.block_checkpoint import (
     load_block_config,
     load_block_weights,
 )
+from anima_xdna_poc.chain import AnimaXDNAChainRuntime
 
 
 def _tiny_block_config():
@@ -230,6 +231,41 @@ class AnimaBlockUnitTests(unittest.TestCase):
                 context_tokens=3,
             )
 
+    def test_cpu_chain_maps_block_indices_and_preserves_zero_residuals(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text(
+                """{
+                    "num_attention_heads": 2,
+                    "attention_head_dim": 12,
+                    "encoder_hidden_states_channels": 16,
+                    "adaln_lora_dim": 8,
+                    "mlp_ratio": 2.0,
+                    "patch_size": [1, 2, 2],
+                    "rope_scale": [1.0, 4.0, 4.0],
+                    "max_size": [8, 8, 8]
+                }""",
+                encoding="utf-8",
+            )
+            checkpoint = root / "model.safetensors"
+            tensors = {}
+            for index in range(2):
+                tensors.update(
+                    {
+                        f"transformer_blocks.{index}.{name}": tensor
+                        for name, tensor in _block_tensors(config).items()
+                    }
+                )
+            save_file(tensors, checkpoint)
+            runtime = AnimaXDNAChainRuntime(checkpoint)
+            inputs = deterministic_block_inputs(config, 4, 3, seed=91)
+            result = runtime.run_cpu_range(inputs, 0, 2)
+            self.assertTrue(torch.equal(result.output, inputs.hidden_states))
+            self.assertEqual([block.index for block in result.blocks], [0, 1])
+            with self.assertRaisesRegex(UnsupportedTensor, r"\[0, 27\]"):
+                runtime.weights(28)
+
 
 class XDNAPocIntegrationTest(unittest.TestCase):
     def test_xdna_matches_cpu_when_available(self):
@@ -297,7 +333,55 @@ class XDNAPocIntegrationTest(unittest.TestCase):
             atol=3e-3,
         )
         self.assertLess(max_error, 0.005)
-        self.assertEqual(actual.dispatch_count, 83)
+        legacy = run_xdna_block(
+            config,
+            weights,
+            inputs,
+            batched_attention=False,
+        )
+        torch.testing.assert_close(
+            actual.output,
+            legacy.output,
+            rtol=2e-2,
+            atol=3e-3,
+        )
+        self.assertEqual(actual.dispatch_count, 23)
+        self.assertEqual(legacy.dispatch_count, 83)
+
+    def test_real_anima_chain_matches_cpu_when_available(self):
+        checkpoint_value = os.environ.get("ANIMA_XDNA_CHECKPOINT")
+        fixture_value = os.environ.get("ANIMA_XDNA_CHAIN_FIXTURE")
+        if not checkpoint_value or not fixture_value:
+            self.skipTest(
+                "ANIMA_XDNA_CHECKPOINT and ANIMA_XDNA_CHAIN_FIXTURE are required"
+            )
+        checkpoint = Path(checkpoint_value)
+        fixture = Path(fixture_value)
+        if not checkpoint.is_file() or not fixture.is_file():
+            self.skipTest(f"chain checkpoint or fixture is missing: {checkpoint}, {fixture}")
+        captured = torch.load(fixture, map_location="cpu", weights_only=True)
+        from anima_xdna_poc.block import BlockInputs
+
+        inputs = BlockInputs(
+            captured["hidden_states"],
+            captured["encoder_hidden_states"],
+            captured["embedded_timestep"],
+            captured["temb"],
+            (captured["cos"], captured["sin"]),
+            captured.get("attention_mask"),
+        )
+        with AnimaXDNAChainRuntime(
+            checkpoint,
+            cache_host_weights=False,
+        ) as runtime:
+            validation = runtime.validate_range(inputs)
+            steady = runtime.run_range(inputs)
+        self.assertEqual(validation.xdna.dispatch_count, 23 * 28)
+        self.assertEqual(steady.dispatch_count, 23 * 28)
+        self.assertLess(
+            max(error.normalized_rms_error for error in validation.errors),
+            0.05,
+        )
 
 
 if __name__ == "__main__":

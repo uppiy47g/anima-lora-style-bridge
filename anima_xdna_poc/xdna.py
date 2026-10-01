@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib.metadata
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -42,6 +43,14 @@ class DispatchResult:
     output_fp32: torch.Tensor
     wall_ms: float
     artifact_cache: Optional[str]
+    h2d_bytes: int = 0
+    d2h_bytes: int = 0
+    allocation_count: int = 0
+    resident_hit: bool = False
+    host_copy_ms: float = 0.0
+    h2d_sync_ms: float = 0.0
+    kernel_sync_ms: float = 0.0
+    d2h_sync_ms: float = 0.0
 
 
 def _imports() -> tuple[Any, Any, Any, Any]:
@@ -161,6 +170,7 @@ class XDNASession:
         self.triton = None
         self._previous_driver = None
         self._compiler = None
+        self._head_chains = {}
 
     def __enter__(self):
         self.triton, _, NPUDriver, _ = _imports()
@@ -173,6 +183,9 @@ class XDNASession:
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
+            for chain in self._head_chains.values():
+                chain.close()
+            self._head_chains.clear()
             if self._compiler is not None:
                 self._compiler.__exit__(exc_type, exc_value, traceback)
         finally:
@@ -221,7 +234,386 @@ class XDNASession:
             output_fp32[: prepared.rows, : prepared.out_features],
             elapsed,
             _artifact_cache(compiled_kernel),
+            prepared.input_bf16.numel() * 2
+            + prepared.weight_k_n_bf16.numel() * 2
+            + output_fp32.numel() * 4,
+            output_fp32.numel() * 4,
+            3,
         )
+
+    def dispatch_head_chain(
+        self,
+        input_h_m_k: torch.Tensor,
+        weight_h_k_n: torch.Tensor,
+        key: str,
+    ) -> DispatchResult:
+        if self.triton is None:
+            raise ExecutionFailure("XDNASession must be entered before dispatch")
+        import numpy as np
+        from triton.backends.amd_triton_npu.multilaunch import NPUChain
+        from .kernel import bf16_head_matmul_kernel
+
+        heads, rows, inner = input_h_m_k.shape
+        if weight_h_k_n.shape[:2] != (heads, inner):
+            raise UnsupportedTensor("head-chain matmul dimensions do not match")
+        columns = weight_h_k_n.shape[-1]
+        padded_rows = math.ceil(rows / 256) * 256
+        padded_inner = max(math.ceil(inner / 64) * 64, 256)
+        padded_columns = math.ceil(columns / 256) * 256
+        if padded_columns == 256 and padded_inner > 256:
+            padded_columns = 512
+        prepared_input = torch.zeros(
+            heads, padded_rows, padded_inner, dtype=torch.bfloat16
+        )
+        prepared_weight = torch.zeros(
+            heads, padded_inner, padded_columns, dtype=torch.bfloat16
+        )
+        prepared_input[:, :rows, :inner] = input_h_m_k.to(torch.bfloat16)
+        prepared_weight[:, :inner, :columns] = weight_h_k_n.to(torch.bfloat16)
+        signature = (heads, padded_rows, padded_columns, padded_inner)
+        chain = self._head_chains.get(signature)
+        if chain is None:
+            chain = NPUChain(
+                "anima_heads_" + "_".join(str(value) for value in signature),
+                air_project_path=str(Path.home() / ".cache" / "anima-xdna" / "air_project"),
+            )
+            output_template = torch.empty(
+                heads, padded_rows, padded_columns, dtype=torch.float32
+            )
+            transform = str(
+                Path.home() / ".cache" / "anima-xdna" / "transform_aie2p_ascii.mlir"
+            )
+            grid = (
+                self.triton.cdiv(padded_rows, 256),
+                self.triton.cdiv(padded_columns, 256),
+            )
+            for head in range(heads):
+                chain.add(
+                    bf16_head_matmul_kernel,
+                    grid,
+                    {0: 0, 1: 1, 2: 2},
+                    args=(prepared_input, prepared_weight, output_template),
+                    constexprs={
+                        "M": padded_rows,
+                        "N": padded_columns,
+                        "K": padded_inner,
+                        "stride_ih": prepared_input.stride(0),
+                        "stride_im": prepared_input.stride(1),
+                        "stride_ik": prepared_input.stride(2),
+                        "stride_wh": prepared_weight.stride(0),
+                        "stride_wk": prepared_weight.stride(1),
+                        "stride_wn": prepared_weight.stride(2),
+                        "stride_oh": output_template.stride(0),
+                        "stride_om": output_template.stride(1),
+                        "stride_on": output_template.stride(2),
+                        "BLOCK_M": 256,
+                        "BLOCK_N": 256,
+                        "BLOCK_K": padded_inner,
+                        "HEAD": head,
+                    },
+                    transform_script=transform,
+                )
+            self._head_chains[signature] = chain
+        arrays = [
+            ResidentXDNASession._bf16_numpy(prepared_input),
+            ResidentXDNASession._bf16_numpy(prepared_weight),
+            np.empty((heads, padded_rows, padded_columns), dtype=np.float32),
+        ]
+        started = time.perf_counter()
+        try:
+            output = chain.run(
+                arrays,
+                bo_key="shape",
+                intermediate_indices={2},
+                output_indices={2},
+            )[2]
+            chain._anima_populated = True
+        except Exception as error:
+            if _is_compilation_error(error):
+                raise CompilationFailure(
+                    f"Triton-XDNA could not compile the head chain: {error}"
+                ) from error
+            raise ExecutionFailure(f"XDNA head-chain execution failed: {error}") from error
+        elapsed = (time.perf_counter() - started) * 1000
+        logical = torch.from_numpy(output)[:, :rows, :columns]
+        return DispatchResult(
+            logical.to(torch.bfloat16),
+            logical,
+            elapsed,
+            None,
+            prepared_input.numel() * 2 + prepared_weight.numel() * 2,
+            0,
+            0,
+            True,
+            kernel_sync_ms=elapsed,
+        )
+
+
+class _ResidentKernelRunner:
+    def __init__(self, artifact_cache: str):
+        import pyxrt
+
+        cache = Path(artifact_cache)
+        kernel_name = (cache / "elf_kernel_name.txt").read_text().strip()
+        self.xrt = pyxrt
+        self.device = pyxrt.device(0)
+        self.elf = pyxrt.elf(str(cache / "aie.elf"))
+        self.context = pyxrt.hw_context(self.device, self.elf)
+        self.kernel = pyxrt.ext.kernel(self.context, kernel_name)
+        self.dynamic_bos: Optional[tuple[list[int], Any, Any]] = None
+        self.weight_bos: dict[str, tuple[int, Any]] = {}
+
+    def run(
+        self,
+        arrays: list[Any],
+        key: str,
+        static_indices: set[int],
+        scratch_indices: set[int],
+        output_index: int,
+    ) -> tuple[Any, dict[str, Any]]:
+        import numpy as np
+
+        sizes = [array.size * array.itemsize for array in arrays]
+        first_weight = key not in self.weight_bos
+        allocation_started = time.perf_counter()
+        allocation_count = 0
+        if self.dynamic_bos is None:
+            input_bo = self.xrt.ext.bo(self.device, sizes[0])
+            output_bo = self.xrt.ext.bo(self.device, sizes[2])
+            self.dynamic_bos = ([sizes[0], sizes[2]], input_bo, output_bo)
+            allocation_count += 2
+        else:
+            dynamic_sizes, input_bo, output_bo = self.dynamic_bos
+            if dynamic_sizes != [sizes[0], sizes[2]]:
+                raise ExecutionFailure(
+                    f"resident dynamic buffers changed sizes from "
+                    f"{dynamic_sizes} to {[sizes[0], sizes[2]]}"
+                )
+        if first_weight:
+            self.weight_bos[key] = (sizes[1], self.xrt.ext.bo(self.device, sizes[1]))
+            allocation_count += 1
+        elif self.weight_bos[key][0] != sizes[1]:
+            raise ExecutionFailure(
+                f"resident weight key {key!r} changed size from "
+                f"{self.weight_bos[key][0]} to {sizes[1]}"
+            )
+        weight_bo = self.weight_bos[key][1]
+        bos = [input_bo, weight_bo, output_bo]
+        allocation_ms = (time.perf_counter() - allocation_started) * 1000
+
+        h2d_bytes = 0
+        copy_ms = 0.0
+        h2d_sync_ms = 0.0
+        for index, array in enumerate(arrays):
+            if index in scratch_indices:
+                continue
+            if index in static_indices and not first_weight:
+                continue
+            started = time.perf_counter()
+            source = np.frombuffer(array, dtype=np.uint8)
+            target = np.frombuffer(bos[index].map(), dtype=np.uint8, count=len(source))
+            np.copyto(target, source, casting="no")
+            copy_ms += (time.perf_counter() - started) * 1000
+            started = time.perf_counter()
+            bos[index].sync(
+                self.xrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE
+            )
+            h2d_sync_ms += (time.perf_counter() - started) * 1000
+            h2d_bytes += sizes[index]
+
+        started = time.perf_counter()
+        run = self.xrt.run(self.kernel)
+        for index, bo in enumerate(bos):
+            run.set_arg(index, bo)
+        run.start()
+        run.wait2()
+        kernel_sync_ms = (time.perf_counter() - started) * 1000
+
+        started = time.perf_counter()
+        bos[output_index].sync(
+            self.xrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE
+        )
+        d2h_sync_ms = (time.perf_counter() - started) * 1000
+        template = arrays[output_index]
+        output = np.frombuffer(
+            bos[output_index].map(),
+            dtype=template.dtype,
+            count=template.size,
+        ).reshape(template.shape)
+        return output, {
+            "h2d_bytes": h2d_bytes,
+            "d2h_bytes": 0,
+            "allocation_count": allocation_count,
+            "resident_hit": not first_weight,
+            "allocation_ms": allocation_ms,
+            "host_copy_ms": copy_ms,
+            "h2d_sync_ms": h2d_sync_ms,
+            "kernel_sync_ms": kernel_sync_ms,
+            "d2h_sync_ms": d2h_sync_ms,
+        }
+
+    def close(self):
+        self.dynamic_bos = None
+        self.weight_bos = {}
+        self.kernel = None
+        self.context = None
+        self.elf = None
+        self.device = None
+
+
+class ResidentXDNASession(XDNASession):
+    """XRT BO-backed execution with weights and scratch persistent by op key."""
+
+    def __init__(self):
+        super().__init__()
+        self._runners: dict[str, _ResidentKernelRunner] = {}
+        self._artifacts: dict[tuple[Any, ...], str] = {}
+        self._resident_specs: dict[str, tuple[str, int, int, int, int, int]] = {}
+
+    @staticmethod
+    def _bf16_numpy(tensor: torch.Tensor):
+        import ml_dtypes
+
+        return tensor.contiguous().view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+
+    def _resident_run(
+        self,
+        compiled: DispatchResult,
+        arrays: list[Any],
+        key: str,
+        logical_shape: tuple[int, ...],
+    ) -> DispatchResult:
+        if compiled.artifact_cache is None:
+            raise ExecutionFailure("compiled kernel did not expose an artifact cache")
+        runner = self._runners.get(compiled.artifact_cache)
+        if runner is None:
+            runner = _ResidentKernelRunner(compiled.artifact_cache)
+            self._runners[compiled.artifact_cache] = runner
+        started = time.perf_counter()
+        output, profile = runner.run(
+            arrays,
+            key,
+            static_indices={1},
+            scratch_indices={2},
+            output_index=2,
+        )
+        wall_ms = (time.perf_counter() - started) * 1000
+        output_fp32 = torch.from_numpy(output)[
+            tuple(slice(0, size) for size in logical_shape)
+        ]
+        return DispatchResult(
+            output_fp32.to(torch.bfloat16),
+            output_fp32,
+            wall_ms,
+            compiled.artifact_cache,
+            **{name: profile[name] for name in (
+                "h2d_bytes",
+                "d2h_bytes",
+                "allocation_count",
+                "resident_hit",
+                "host_copy_ms",
+                "h2d_sync_ms",
+                "kernel_sync_ms",
+                "d2h_sync_ms",
+            )},
+        )
+
+    def dispatch_resident(self, prepared: PreparedLinear, key: str) -> DispatchResult:
+        import numpy as np
+
+        signature = ("linear",) + prepared.padded_shape
+        artifact = self._artifacts.get(signature)
+        if artifact is None:
+            compiled = self.dispatch(prepared)
+            if compiled.artifact_cache is None:
+                raise ExecutionFailure("compiled kernel did not expose an artifact cache")
+            artifact = compiled.artifact_cache
+            self._artifacts[signature] = artifact
+        else:
+            compiled = DispatchResult(
+                torch.empty(0, dtype=torch.bfloat16),
+                torch.empty(0),
+                0.0,
+                artifact,
+            )
+        arrays = [
+            self._bf16_numpy(prepared.input_bf16),
+            self._bf16_numpy(prepared.weight_k_n_bf16),
+            np.empty(
+                (prepared.input_bf16.shape[0], prepared.weight_k_n_bf16.shape[1]),
+                dtype=np.float32,
+            ),
+        ]
+        result = self._resident_run(
+            compiled,
+            arrays,
+            key,
+            (prepared.rows, prepared.out_features),
+        )
+        self._resident_specs[key] = (
+            artifact,
+            prepared.input_bf16.shape[0],
+            prepared.weight_k_n_bf16.shape[1],
+            prepared.input_bf16.shape[1],
+            prepared.rows,
+            prepared.out_features,
+        )
+        return result
+
+    def has_resident(self, key: str) -> bool:
+        return key in self._resident_specs
+
+    def dispatch_resident_input(
+        self,
+        input_tensor: torch.Tensor,
+        key: str,
+    ) -> DispatchResult:
+        import ml_dtypes
+        import numpy as np
+
+        try:
+            artifact, padded_rows, padded_columns, padded_inner, rows, columns = (
+                self._resident_specs[key]
+            )
+        except KeyError as error:
+            raise ExecutionFailure(f"resident weight is not populated: {key}") from error
+        if input_tensor.ndim != 2 or input_tensor.shape[0] != rows:
+            raise UnsupportedTensor("resident Linear input must be rank 2")
+        if input_tensor.shape[1] > padded_inner:
+            raise UnsupportedTensor(
+                f"resident input width {input_tensor.shape[1]} exceeds {padded_inner}"
+            )
+        prepared_input = torch.zeros(
+            padded_rows, padded_inner, dtype=torch.bfloat16
+        )
+        prepared_input[:rows, : input_tensor.shape[1]] = input_tensor.to(torch.bfloat16)
+        compiled = DispatchResult(
+            torch.empty(0, dtype=torch.bfloat16),
+            torch.empty(0),
+            0.0,
+            artifact,
+        )
+        arrays = [
+            self._bf16_numpy(prepared_input),
+            np.empty((padded_inner, padded_columns), dtype=ml_dtypes.bfloat16),
+            np.empty((padded_rows, padded_columns), dtype=np.float32),
+        ]
+        return self._resident_run(
+            compiled,
+            arrays,
+            key,
+            (rows, columns),
+        )
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            for runner in self._runners.values():
+                runner.close()
+            self._runners.clear()
+            self._artifacts.clear()
+            self._resident_specs.clear()
+        finally:
+            super().__exit__(exc_type, exc_value, traceback)
 
 
 def execute(prepared: PreparedLinear, warmup: int = 1, runs: int = 5) -> ExecutionResult:

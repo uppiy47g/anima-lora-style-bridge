@@ -14,13 +14,17 @@ from .block_checkpoint import (
     load_block_weights,
 )
 from .checkpoint import LinearWeight, discover_linear_weight
+from .chain import AnimaXDNAChainRuntime, ChainResult, ChainValidation
 from .linear import PreparedLinear, cpu_linear, deterministic_input, prepare_linear
 
 __all__ = [
     "AnimaBlockConfig",
     "AnimaBlockWeights",
+    "AnimaXDNAChainRuntime",
     "BlockInputs",
     "BlockResult",
+    "ChainResult",
+    "ChainValidation",
     "LinearWeight",
     "PreparedLinear",
     "cpu_linear",

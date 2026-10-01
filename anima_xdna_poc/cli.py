@@ -225,9 +225,176 @@ def block_main(argv: list[str] | None = None) -> int:
                 "dispatches": metric.dispatches,
                 "estimated_flops": metric.estimated_flops,
                 "transfer_bytes": metric.transfer_bytes,
+                "h2d_bytes": metric.h2d_bytes,
+                "d2h_bytes": metric.d2h_bytes,
+                "allocation_count": metric.allocation_count,
+                "resident_hits": metric.resident_hits,
+                "host_copy_ms": metric.host_copy_ms,
+                "h2d_sync_ms": metric.h2d_sync_ms,
+                "kernel_sync_ms": metric.kernel_sync_ms,
+                "d2h_sync_ms": metric.d2h_sync_ms,
             }
             for metric in result.metrics
         ],
     }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def chain_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Execute an Anima transformer block range with resident XDNA buffers"
+    )
+    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--fixture", type=Path, help="captured BlockInputs .pt file")
+    parser.add_argument("--image-tokens", type=int, default=1024)
+    parser.add_argument("--context-tokens", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--start-block", type=int, default=0)
+    parser.add_argument("--end-block", type=int, default=28)
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--runs", type=int, default=2)
+    parser.add_argument("--oracle", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--profile", action="store_true")
+    args = parser.parse_args(argv)
+    if args.warmups < 0 or args.runs <= 0:
+        parser.error("--warmups must be non-negative and --runs must be positive")
+
+    try:
+        from .block import BlockInputs, deterministic_block_inputs
+        from .chain import AnimaXDNAChainRuntime
+
+        with AnimaXDNAChainRuntime(
+            args.checkpoint,
+            args.config,
+            cache_host_weights=False,
+        ) as runtime:
+            if args.fixture:
+                captured = torch.load(args.fixture, map_location="cpu", weights_only=True)
+                inputs = BlockInputs(
+                    captured["hidden_states"],
+                    captured["encoder_hidden_states"],
+                    captured["embedded_timestep"],
+                    captured["temb"],
+                    (captured["cos"], captured["sin"]),
+                    captured.get("attention_mask"),
+                )
+                input_kind = "captured model preprocessing"
+            else:
+                inputs = deterministic_block_inputs(
+                    runtime.config,
+                    args.image_tokens,
+                    args.context_tokens,
+                    args.seed,
+                )
+                input_kind = "deterministic synthetic"
+
+            import time
+
+            populate_started = time.perf_counter()
+            validation = None
+            if args.oracle:
+                validation = runtime.validate_range(
+                    inputs,
+                    args.start_block,
+                    args.end_block,
+                )
+                populated = validation.xdna
+            else:
+                populated = runtime.run_range(
+                    inputs,
+                    args.start_block,
+                    args.end_block,
+                )
+            populate_ms = (time.perf_counter() - populate_started) * 1000
+            for _ in range(args.warmups):
+                runtime.run_range(inputs, args.start_block, args.end_block)
+            repeated = []
+            for _ in range(args.runs):
+                started = time.perf_counter()
+                result = runtime.run_range(
+                    inputs,
+                    args.start_block,
+                    args.end_block,
+                )
+                repeated.append(((time.perf_counter() - started) * 1000, result))
+    except PrototypeError as error:
+        return _print_failure(error)
+
+    final = repeated[-1][1]
+    metrics = [
+        metric
+        for block in final.blocks
+        for metric in block.result.metrics
+    ]
+    errors = []
+    if validation is not None:
+        errors = [
+            {
+                "block": error.index,
+                "max_abs_error": error.max_abs_error,
+                "mean_abs_error": error.mean_abs_error,
+                "rms_error": error.rms_error,
+                "reference_rms": error.reference_rms,
+                "normalized_rms_error": error.normalized_rms_error,
+            }
+            for error in validation.errors
+        ]
+    worst = (
+        max(errors, key=lambda item: item["normalized_rms_error"])
+        if errors
+        else None
+    )
+    payload = {
+        "status": "match" if validation is not None else "executed_without_oracle",
+        "input": input_kind,
+        "block_range": [args.start_block, args.end_block],
+        "shape": {
+            "batch": inputs.hidden_states.shape[0],
+            "image_tokens": inputs.hidden_states.shape[1],
+            "hidden_size": inputs.hidden_states.shape[2],
+            "context_tokens": inputs.encoder_hidden_states.shape[1],
+            "context_dim": inputs.encoder_hidden_states.shape[2],
+        },
+        "dispatches": final.dispatch_count,
+        "dispatches_per_block": final.dispatch_count / len(final.blocks),
+        "populate_or_validate_ms": populate_ms,
+        "cpu_oracle_ms": validation.cpu.wall_ms if validation else None,
+        "cached_run_ms": [wall for wall, _ in repeated],
+        "steady_median_ms": sorted(wall for wall, _ in repeated)[len(repeated) // 2],
+        "profile": {
+            "h2d_staging_bytes": sum(metric.h2d_bytes for metric in metrics),
+            "d2h_staging_bytes": sum(metric.d2h_bytes for metric in metrics),
+            "allocations": sum(metric.allocation_count for metric in metrics),
+            "resident_hits": sum(metric.resident_hits for metric in metrics),
+            "host_copy_ms": sum(metric.host_copy_ms for metric in metrics),
+            "cache_sync_ms": sum(
+                metric.h2d_sync_ms + metric.d2h_sync_ms for metric in metrics
+            ),
+            "kernel_and_wait_ms": sum(metric.kernel_sync_ms for metric in metrics),
+            "host_operations_ms": sum(
+                metric.wall_ms for metric in metrics if metric.device == "host"
+            ),
+            "npu_logical_flops": sum(
+                metric.estimated_flops for metric in metrics if metric.device == "xdna2"
+            ),
+        },
+        "block_wall_ms": [
+            {"block": block.index, "wall_ms": block.wall_ms}
+            for block in final.blocks
+        ],
+        "worst_block_error": worst,
+        "final_error": errors[-1] if errors else None,
+        "block_errors": errors,
+    }
+    if args.profile:
+        payload["stages"] = [
+            {
+                "block": block.index,
+                "stages": [metric.__dict__ for metric in block.result.metrics],
+            }
+            for block in final.blocks
+        ]
     print(json.dumps(payload, indent=2))
     return 0

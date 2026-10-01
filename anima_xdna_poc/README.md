@@ -1,10 +1,10 @@
-# Anima block 0 on AMD XDNA 2
+# Anima resident transformer chain on AMD XDNA 2
 
 This isolated proof of concept executes either one Anima Linear or the complete
-first Anima/Cosmos transformer block directly from its original safetensors on
-XDNA 2 through Triton-XDNA and XRT. It does **not** use ONNX, Vitis AI EP, or a
-converted model format, and it does not modify the existing LoRA bridge,
-ComfyUI, or model files.
+Anima/Cosmos transformer chain (one block, a range, or all 28 blocks) directly
+from its original safetensors on XDNA 2 through Triton-XDNA and XRT. It does
+**not** use ONNX, Vitis AI EP, or a converted model format, and it does not
+modify the existing LoRA bridge, ComfyUI, or model files.
 
 ## Supported model and exact block
 
@@ -31,28 +31,46 @@ adapters over Base, not independent full transformer checkpoints. Their block
 shape appears inherited from Base, but LoRA application is not implemented in
 this milestone.
 
-## NPU and host boundary
+## NPU, attention fusion, and residency
 
 Every block Linear and every QK-transpose/attention-value GEMM runs on XDNA 2.
-The current non-fused implementation uses 83 XRT dispatches: 16 model Linear
-dispatches, 64 per-head attention GEMMs, and three extra dispatches because the
-8192-wide MLP reduction is split into four FP32 partials. Triton-XDNA currently
-rejects tensors larger than 1,048,576 elements during lowering, which prevents
-a whole-K 8192 reduction. Inputs, weights, and outputs are BF16; accumulation
-and split-reduction summation are FP32.
+The optimized path uses **23 XRT dispatches per block**:
 
-SiLU, LayerNorm/modulation, RMSNorm, RoPE, mask/scale/softmax, GELU, tensor
-layout, gates, and residual additions remain explicit PyTorch CPU operations.
-The CLI reports each stage's device and wall time, the total dispatch count,
-logical GEMM FLOPs, source-tensor transfer estimate, and residual-stage
-numerical errors. There is no silent CPU fallback.
+- 19 Linear dispatches (the 16 logical model Linear operations, with the
+  8192-wide MLP output reduction split into four FP32 partials);
+- four attention dispatches: self QK, self AV, cross QK, and cross AV.
 
-The deterministic default fixture matches a 512x512 image path after VAE and
-`[1,2,2]` patching: batch 1, 1024 image tokens, hidden size 2048, 512 prompt
-tokens, and context width 1024. It uses synthetic deterministic patchified
-hidden/context/timestep inputs rather than a captured generation activation;
-the block semantics, shapes, real weights, mask contract, and Cosmos RoPE are
-otherwise exact.
+Each attention dispatch uses Triton-XDNA's official `NPUChain` multi-launch API
+to stitch the 16 correct head-specific Triton kernels into one ELF/XRT run.
+This removes the head-count-proportional host dispatches without changing
+head semantics. A single 3D Triton grid was tested and rejected because the
+installed AIE2P lowering corrupted heads at realistic multi-tile shapes;
+folding heads into the program M dimension was also rejected by AIR tile-size
+inference. Neither unsafe path is used by the package.
+
+The resident session owns the XRT device, ELF objects, hardware contexts,
+kernels, and mapped `ext.bo` buffers. Static weight BOs are populated once and
+reused across blocks/runs; dynamic input and output BOs are reused by shape.
+Outputs remain mapped rather than being copied to a separate host tensor, so
+the steady path has zero explicit D2H staging copies. Cache synchronization is
+measured separately. After population, checkpoint tensors are replaced by
+shape/dtype metadata (except the small Q/K RMSNorm vectors), avoiding a second
+approximately 4 GB host copy while the resident BOs are live. The safetensors
+checkpoint always remains the source of truth.
+
+SiLU, LayerNorm/AdaLN modulation, Q/K RMSNorm, RoPE, scale/mask/softmax, exact
+GELU, tensor reshapes, gates, and residual additions remain explicit PyTorch
+CPU operations over shared/mapped memory. These operations and their timing
+are reported; there is no silent CPU fallback. Parameterized GEMMs account for
+137,451,536,384 logical FLOPs per block and are all on the NPU.
+
+The supported 512x512 path is batch 1, 1024 image tokens, hidden size 2048,
+512 context tokens, and context width 1024. The deterministic default input is
+synthetic. Hardware chain validation used exact Anima model patch embedding,
+timestep embedding, `temb`, and Cosmos RoPE captured read-only before block 0,
+but with a random latent and synthetic text context. It is therefore
+model-produced preprocessing, not a capture from a real prompt-generation
+run.
 
 ## Windows prerequisites
 
@@ -100,32 +118,58 @@ anima-xdna-probe
 anima-xdna-linear D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
 anima-xdna-block D:\models\Anima\transformer\diffusion_pytorch_model.safetensors `
   --image-tokens 1024 --context-tokens 512 --runs 2
+anima-xdna-chain D:\models\Anima\transformer\diffusion_pytorch_model.safetensors `
+  --fixture C:\captures\anima-real-preblock.pt `
+  --start-block 0 --end-block 28 --warmups 1 --runs 3 --profile
 ```
 
 `anima-xdna-probe` must report `target: npu2` and `runtime: xrt`.
-`anima-xdna-block` reports `status: match`, exact shape, NPU/host operation
-lists, compile/cached run timing, 83 dispatches, transfer and FLOP estimates,
-artifact caches, final max/mean errors, and errors after self-attention,
-cross-attention, and MLP.
+The block and chain CLIs report exact shape/range, NPU/host operation timing,
+dispatches, H2D/D2H staging bytes, allocations/resident hits, host-copy,
+cache-sync and kernel/wait time, logical NPU FLOPs, cold/populate/cached timing,
+and blockwise numerical errors.
 
 On the validated Ryzen AI 9 365 / NPU Strix system, Anima Base block 0 at
-1024/512 tokens produced:
+1024/512 captured inputs produced:
 
-- first compile/populate run: 57.002 s;
-- cached process-first run: 1.570 s;
-- cached steady run: 0.662 s;
-- CPU oracle: 0.717 s;
-- logical NPU GEMM work: 137,451,536,384 FLOPs;
-- estimated source payload transfer: 0.342 GiB;
-- max/mean absolute output error: `9.765625e-4` / `2.131443e-5`;
-- residual-stage max errors: `4.882813e-4`, `4.882813e-4`,
-  `9.765625e-4`.
+| Metric | Legacy per-head path | Resident stitched path |
+|---|---:|---:|
+| XRT dispatches/block | 83 | 23 |
+| H2D staging/block | 612,237,312 B | 156,631,040 B |
+| D2H staging/block | 314,048,512 B | 0 B |
+| cached wall/block | about 2.086 s | 0.236-0.362 s |
 
-The default tolerance is `rtol=0.02`, `atol=0.003`, and the observed error is
-below it. The tolerance accounts for cumulative BF16 rounding over all three
-residual stages; it was not widened to mask a failing result. A
-small-token block was also compared with the installed authoritative Diffusers
-module, with maximum CPU-oracle difference `4.882813e-4`.
+One representative steady optimized block measured 252.4 ms wall, including
+111.2 ms XRT kernel/wait, 35.7 ms explicit host operations, 2.5 ms mapped-BO
+host copies, and 3.3 ms cache synchronization. The legacy synthetic benchmark
+was 0.662 s and its CPU oracle was 0.717 s. The optimized path is both faster
+than that CPU result and materially reduces dispatch and staging.
+
+The first build of all four stitched 16-head artifacts took approximately
+862 s on this toolchain; the native Triton cache reuses those shape-specific
+artifacts for every block and later process. This compile cost is never
+reported as steady execution.
+
+The full 28-block resident chain measured:
+
+- 644 dispatches (`23 x 28`);
+- cached steady wall times of 7.02, 7.03, and 7.15 s;
+- approximately 0.25 s median per block;
+- 23.19 s for the CPU oracle (about 3.3x slower);
+- 4,385,669,120 B of H2D staging and zero explicit D2H staging;
+- about 3.22 s total XRT kernel/wait, 73-75 ms host copy, and 86-89 ms cache
+  synchronization;
+- final normalized RMS error `0.007466678`;
+- worst normalized RMS error `0.041646643` at block 13;
+- final max/mean absolute error 1664 / 7.2158.
+
+Absolute errors become large at sparse, very high-magnitude activations in the
+deep chain, so full-chain validation uses normalized RMS at every block with a
+fixed 5% gate; all blocks pass. This does not replace strict single-block
+coverage: the deterministic block integration still compares elementwise with
+`rtol=0.02`, `atol=0.003`. The CPU adapter was also checked against the
+installed Diffusers 0.39.0 authoritative 28-block chain and ended at about
+0.7% normalized RMS difference.
 
 Failures use distinct categories and exit codes: dependency unavailable (2),
 NPU unavailable (3), unsupported shape/config/dtype (4), compilation failure
@@ -134,21 +178,31 @@ NPU unavailable (3), unsupported shape/config/dtype (4), compilation failure
 ## Tests and limitations
 
 CPU tests cover exact key/config discovery, lazy block loading, shape rejection,
-layout/padding, deterministic inputs, RoPE, attention masks, and the complete
-CPU block residual path. The real-NPU test is enabled by:
+layout/padding, deterministic inputs, RoPE, attention masks, the complete CPU
+block residual path, block-index mapping, and CPU range execution. Real-NPU
+tests cover Linear, stitched-versus-legacy block attention, the optimized
+23-dispatch block, resident reuse, and the complete 28-block numerical chain:
 
 ```powershell
 $env:ANIMA_XDNA_CHECKPOINT = "D:\models\Anima\transformer\diffusion_pytorch_model.safetensors"
-python -m unittest tests.test_xdna_poc -v
+$env:ANIMA_XDNA_CHAIN_FIXTURE = "C:\captures\anima-real-preblock.pt"
+python -m unittest discover -s tests -v
 ```
 
-Without that variable or the toolchain, it skips with the precise missing
-boundary.
+Without those variables or the toolchain, hardware tests skip with the precise
+missing boundary.
 
-This is not yet a ComfyUI backend or full image generator. It does not capture
-live pipeline activations, apply LoRAs, execute patch/time embedding, or run all
-28 blocks. Fine-grained head dispatch and repeated host/NPU transfers dominate
-runtime; the CPU oracle is currently competitive after cache warmup. The next
-milestone is a batched/fused attention kernel plus persistent device buffers,
-then chaining all 28 blocks behind a ComfyUI MODEL wrapper while retaining the
-same safetensors/LoRA source format.
+This is not yet a ComfyUI backend or full image generator. Patch/time embedding
+and the 28-block adapter are validated separately rather than wired into the
+ComfyUI sampler. LoRA application, real Qwen prompt-conditioning capture,
+output norm/projection, VAE decoding, diffusion-step scheduling, and
+multi-step buffer ownership remain outside this prototype. Host normalization,
+softmax, GELU, gates, and residuals still expose mapped buffers to PyTorch and
+require cache synchronization; the reported H2D figure is bytes copied into
+mapped BO pages on a unified-memory APU, not necessarily physical DRAM traffic.
+
+The next milestone is a ComfyUI MODEL wrapper that owns one resident session
+across diffusion steps, applies checkpoint-compatible LoRAs before BO
+population, captures real pipeline conditioning, and then moves the remaining
+normalization/softmax/elementwise stages onto AIE to reduce the 23 dispatches
+and mapped-memory synchronization further.
