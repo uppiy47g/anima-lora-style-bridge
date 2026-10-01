@@ -11,6 +11,7 @@ from .errors import UnsupportedTensor
 ALIGNMENT = 8
 BLOCK_M = 256
 BLOCK_N = 256
+BLOCK_K = 64
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ def prepare_linear(input_tensor: torch.Tensor, weight_out_in: torch.Tensor) -> P
         raise UnsupportedTensor("Linear dimensions must all be positive")
 
     padded_rows = _aligned(rows, BLOCK_M)
-    padded_in = _aligned(in_features)
+    padded_in = _aligned(in_features, BLOCK_K)
     padded_out = _aligned(out_features, BLOCK_N)
     prepared_input = torch.zeros(padded_rows, padded_in, dtype=torch.bfloat16)
     prepared_weight = torch.zeros(padded_in, padded_out, dtype=torch.bfloat16)

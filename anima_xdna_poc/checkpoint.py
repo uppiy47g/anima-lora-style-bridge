@@ -14,6 +14,8 @@ CANONICAL_ALIASES = (
     "diffusion_model.blocks.0.self_attn.q_proj.weight",
     "model.diffusion_model.blocks.0.self_attn.q_proj.weight",
     "blocks.0.self_attn.q_proj.weight",
+    "transformer_blocks.0.attn1.to_q.weight",
+    "diffusion_model.transformer_blocks.0.attn1.to_q.weight",
     "diffusion_model.transformer_blocks.0.self_attn.q_proj.weight",
     "transformer_blocks.0.self_attn.q_proj.weight",
 )
@@ -43,6 +45,7 @@ def select_weight_key(keys: Iterable[str], aliases: Sequence[str] = CANONICAL_AL
     suffixes = (
         "blocks.0.self_attn.q_proj.weight",
         "transformer_blocks.0.self_attn.q_proj.weight",
+        "transformer_blocks.0.attn1.to_q.weight",
     )
     matches = sorted(
         key for key in available if any(key.endswith(suffix) for suffix in suffixes)

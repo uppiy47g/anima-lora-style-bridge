@@ -18,6 +18,10 @@ class XDNAPocUnitTests(unittest.TestCase):
         )
         self.assertEqual(selected, canonical)
 
+    def test_selects_diffusers_anima_q_projection(self):
+        key = "transformer_blocks.0.attn1.to_q.weight"
+        self.assertEqual(select_weight_key([key]), key)
+
     def test_ambiguous_suffix_requires_explicit_key(self):
         with self.assertRaisesRegex(UnsupportedTensor, "multiple candidate"):
             select_weight_key(
@@ -54,7 +58,7 @@ class XDNAPocUnitTests(unittest.TestCase):
         inputs = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.bfloat16)
         weight = torch.arange(15, dtype=torch.float32).reshape(5, 3)
         prepared = prepare_linear(inputs, weight)
-        self.assertEqual(prepared.padded_shape, (256, 256, 8))
+        self.assertEqual(prepared.padded_shape, (256, 256, 64))
         self.assertTrue(
             torch.equal(prepared.weight_k_n_bf16[:3, :5], weight.to(torch.bfloat16).T)
         )
@@ -90,8 +94,13 @@ class XDNAPocIntegrationTest(unittest.TestCase):
             self.skipTest(f"{error.category}: {error}")
 
         prepared = prepare_linear(
-            deterministic_input(8, 8, seed=31),
-            torch.randn(8, 8, generator=torch.Generator().manual_seed(32)),
+            deterministic_input(256, 256, seed=31),
+            torch.randn(
+                256,
+                256,
+                generator=torch.Generator().manual_seed(32),
+            )
+            / (256**0.5),
         )
         reference = cpu_linear(prepared)
         result = execute(prepared, warmup=0, runs=1)
@@ -99,7 +108,7 @@ class XDNAPocIntegrationTest(unittest.TestCase):
             result.output_bf16,
             reference,
             rtol=1.6e-2,
-            atol=1.5e-3 * (8192 / 8) ** 0.5,
+            atol=1.5e-3 * (8192 / 256) ** 0.5,
         )
 
 

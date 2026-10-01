@@ -10,14 +10,16 @@ bridge.
 
 The default target is block 0 self-attention `q_proj`. Canonical checkpoint
 aliases and an unambiguous suffix fallback are supported; `--key` accepts the
-actual key when a checkpoint differs. `safetensors.safe_open` maps the file and
-materializes only the selected tensor.
+actual key when a checkpoint differs. This includes both ComfyUI-style
+`diffusion_model.blocks.0.self_attn.q_proj.weight` and Diffusers-style
+`transformer_blocks.0.attn1.to_q.weight`. `safetensors.safe_open` maps the file
+and materializes only the selected tensor.
 
 The checkpoint weight is `[out_features, in_features]`. The prototype converts
 only that tensor to BF16, transposes it to contiguous `[K, N]`, creates a
 deterministic BF16 `[M, K]` input, and pads transient M/N buffers to the
-mask-free kernel's 256x256 launch tile and K to the AIE2P BF16 MAC alignment
-of 8. Triton-XDNA auto-generates the matmul transform
+mask-free kernel's 256x256 launch tile and K to the validated transform's
+64-element reduction tile. Triton-XDNA compiles the matmul transform
 schedule, compiles through MLIR-AIR/MLIR-AIE, and dispatches through XRT.
 Accumulation is FP32; both NPU and CPU results are rounded to BF16 before
 comparison. Triton's native cache stores compiled XDNA artifacts; the original
@@ -35,10 +37,10 @@ safetensors remains the only weight source.
   inner `xrt_sdk\xrt` directory to `C:\Program Files\AMD\xrt`, or set
   `XRT_DEV_DIR`. Copy the matching `python\pyxrt.pyd` into the environment's
   `site-packages`.
-- Triton-XDNA 0.1 or a known source revision. The API is experimental; this
-  prototype was written against
-  [`amd/Triton-XDNA`](https://github.com/amd/Triton-XDNA) main at
-  `51c55a0f92e77b5be24de67180e937ead475dd9c`.
+- Triton-XDNA from the official AMD wheel index. The API is experimental; the
+  first implementation was based on upstream main at
+  `51c55a0f92e77b5be24de67180e937ead475dd9c`, and hardware validation used
+  `3.6.0.2026093004+75679dc`.
 
 Do not set `XILINX_XRT` on Windows; use `XRT_DEV_DIR` or
 `AMD_TRITON_NPU_XRT_DIR`.
@@ -56,6 +58,13 @@ python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e ".[xdna-poc]"
 ```
 
+The latest official XRT release does not always publish a Windows SDK asset.
+Hardware validation used the newest release that did, XRT `2.21.75`, whose
+`xrt_windows_sdk.zip` SHA-256 is
+`ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295`.
+The SDK may be installed under a user-writable directory and selected with a
+user-level `XRT_DEV_DIR`; no `Program Files` write is required.
+
 ## Commands
 
 ```powershell
@@ -67,6 +76,13 @@ A successful probe prints JSON with `"status": "ready"`, `"target": "npu2"`,
 and `"runtime": "xrt"`. A successful validation prints `"status": "match"`,
 the selected key and logical/padded shapes, timing, tolerance, and Triton's
 artifact-cache location.
+
+On Windows, MLIR-AIE uses relative paths for some intermediates and upstream
+transform comments contain UTF-8 punctuation. The prototype therefore stages
+compiler intermediates and an ASCII-safe generated transform under
+`%USERPROFILE%\.cache\anima-xdna`, independently of the current working
+directory. This supports repositories whose paths contain Japanese characters
+without requiring a process-wide `PYTHONUTF8` setting.
 
 Failures are never silently sent to CPU. The CLIs label and return distinct
 codes for dependency unavailable (2), NPU unavailable (3), unsupported
