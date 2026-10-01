@@ -42,6 +42,7 @@ xdna-poc = []
 anima-style-bridge = "anima_style_bridge:main"
 anima-xdna-probe = "anima_xdna_poc.cli:probe_main"
 anima-xdna-linear = "anima_xdna_poc.cli:linear_main"
+anima-xdna-block = "anima_xdna_poc.cli:block_main"
 
 [tool.setuptools]
 py-modules = ["anima_style_bridge"]

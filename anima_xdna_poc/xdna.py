@@ -36,6 +36,14 @@ class ExecutionResult:
     artifact_cache: Optional[str]
 
 
+@dataclass(frozen=True)
+class DispatchResult:
+    output_bf16: torch.Tensor
+    output_fp32: torch.Tensor
+    wall_ms: float
+    artifact_cache: Optional[str]
+
+
 def _imports() -> tuple[Any, Any, Any, Any]:
     try:
         import triton
@@ -117,6 +125,105 @@ def _compiler_scope():
         os.chdir(previous_cwd)
 
 
+def _artifact_cache(compiled_kernel: Any) -> Optional[str]:
+    if compiled_kernel is not None:
+        try:
+            from triton.backends.amd_triton_npu.driver import get_npu_cache_dir
+
+            resolved_cache = get_npu_cache_dir(compiled_kernel)
+            if resolved_cache is not None:
+                return str(resolved_cache)
+        except (ImportError, TypeError, AttributeError):
+            pass
+    try:
+        from triton.backends.amd_triton_npu import driver as npu_driver
+
+        module_path = Path(npu_driver._last_dispatched_module.__file__)
+        return str(module_path.parent)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _is_compilation_error(error: Exception) -> bool:
+    error_type = type(error)
+    return (
+        isinstance(error, subprocess.CalledProcessError)
+        or "compilation" in error_type.__name__.lower()
+        or error_type.__module__.startswith("triton.compiler")
+        or "error encountered during parsing" in str(error).lower()
+    )
+
+
+class XDNASession:
+    """Keep one driver/compiler scope active across a multi-dispatch block."""
+
+    def __init__(self):
+        self.triton = None
+        self._previous_driver = None
+        self._compiler = None
+
+    def __enter__(self):
+        self.triton, _, NPUDriver, _ = _imports()
+        probe()
+        self._previous_driver = self.triton.runtime.driver._active
+        self.triton.runtime.driver.set_active(NPUDriver("xrt"))
+        self._compiler = _compiler_scope()
+        self._compiler.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            if self._compiler is not None:
+                self._compiler.__exit__(exc_type, exc_value, traceback)
+        finally:
+            if self.triton is not None:
+                self.triton.runtime.driver.set_active(self._previous_driver)
+
+    def dispatch(self, prepared: PreparedLinear) -> DispatchResult:
+        if self.triton is None:
+            raise ExecutionFailure("XDNASession must be entered before dispatch")
+        m, n, k = _validate_prepared(prepared)
+        try:
+            from .kernel import bf16_linear_kernel
+        except Exception as error:
+            raise DependencyUnavailable(f"cannot import the Triton kernel: {error}") from error
+        output_fp32 = torch.empty((m, n), dtype=torch.float32)
+        grid = (self.triton.cdiv(m, 256), self.triton.cdiv(n, 256))
+        started = time.perf_counter()
+        try:
+            compiled_kernel = bf16_linear_kernel[grid](
+                prepared.input_bf16,
+                prepared.weight_k_n_bf16,
+                output_fp32,
+                M=m,
+                N=n,
+                K=k,
+                stride_im=prepared.input_bf16.stride(0),
+                stride_ik=prepared.input_bf16.stride(1),
+                stride_wk=prepared.weight_k_n_bf16.stride(0),
+                stride_wn=prepared.weight_k_n_bf16.stride(1),
+                stride_om=output_fp32.stride(0),
+                stride_on=output_fp32.stride(1),
+                BLOCK_M=256,
+                BLOCK_N=256,
+                BLOCK_K=k,
+            )
+        except Exception as error:
+            if _is_compilation_error(error):
+                raise CompilationFailure(
+                    f"Triton-XDNA could not compile the BF16 kernel: {error}"
+                ) from error
+            raise ExecutionFailure(f"XDNA 2 kernel execution failed: {error}") from error
+        elapsed = (time.perf_counter() - started) * 1000
+        output = output_fp32[: prepared.rows, : prepared.out_features].to(torch.bfloat16)
+        return DispatchResult(
+            output,
+            output_fp32[: prepared.rows, : prepared.out_features],
+            elapsed,
+            _artifact_cache(compiled_kernel),
+        )
+
+
 def execute(prepared: PreparedLinear, warmup: int = 1, runs: int = 5) -> ExecutionResult:
     if warmup < 0 or runs <= 0:
         raise UnsupportedTensor("warmup must be non-negative and runs must be positive")
@@ -155,7 +262,7 @@ def execute(prepared: PreparedLinear, warmup: int = 1, runs: int = 5) -> Executi
                     BLOCK_K=k,
                 )
             except Exception as error:
-                if isinstance(error, subprocess.CalledProcessError):
+                if _is_compilation_error(error):
                     raise CompilationFailure(
                         f"Triton-XDNA could not compile the BF16 Linear kernel: {error}"
                     ) from error
@@ -193,24 +300,7 @@ def execute(prepared: PreparedLinear, warmup: int = 1, runs: int = 5) -> Executi
     finally:
         triton.runtime.driver.set_active(previous_driver)
 
-    cache_dir = None
-    if compiled_kernel is not None:
-        try:
-            from triton.backends.amd_triton_npu.driver import get_npu_cache_dir
-
-            resolved_cache = get_npu_cache_dir(compiled_kernel)
-            if resolved_cache is not None:
-                cache_dir = str(resolved_cache)
-        except (ImportError, TypeError, AttributeError):
-            pass
-    if cache_dir is None:
-        try:
-            from triton.backends.amd_triton_npu import driver as npu_driver
-
-            module_path = Path(npu_driver._last_dispatched_module.__file__)
-            cache_dir = str(module_path.parent)
-        except (AttributeError, TypeError):
-            pass
+    cache_dir = _artifact_cache(compiled_kernel)
     timings.sort()
     median = timings[len(timings) // 2]
     output = output_fp32[: prepared.rows, : prepared.out_features].to(torch.bfloat16)

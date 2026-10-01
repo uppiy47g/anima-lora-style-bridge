@@ -63,8 +63,13 @@ def prepare_linear(input_tensor: torch.Tensor, weight_out_in: torch.Tensor) -> P
         raise UnsupportedTensor("Linear dimensions must all be positive")
 
     padded_rows = _aligned(rows, BLOCK_M)
-    padded_in = _aligned(in_features, BLOCK_K)
+    padded_in = max(_aligned(in_features, BLOCK_K), 256)
     padded_out = _aligned(out_features, BLOCK_N)
+    # Triton-XDNA 3.6 cannot lower a single 256x256 output tile when K spans
+    # multiple AIE reduction tiles. A second zero output tile keeps the same
+    # logical result and gives AIR a legal herd mapping.
+    if padded_out == BLOCK_N and padded_in > 256:
+        padded_out = 2 * BLOCK_N
     prepared_input = torch.zeros(padded_rows, padded_in, dtype=torch.bfloat16)
     prepared_weight = torch.zeros(padded_in, padded_out, dtype=torch.bfloat16)
     prepared_input[:rows, :in_features] = input_tensor.to(torch.bfloat16)
