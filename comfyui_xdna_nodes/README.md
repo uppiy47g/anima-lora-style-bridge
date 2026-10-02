@@ -4,6 +4,10 @@ This custom-node package replaces only the 28 `transformer_blocks` in ComfyUI's
 native Anima Base v1.0 diffusion model with the resident Triton-XDNA/XRT
 runtime. It does **not** use ONNX or Vitis AI EP.
 
+For an isolated Windows setup, sanitized launcher/model-path templates, the
+full verification ladder, image evidence, and machine-readable measurements,
+see the [public reproducibility report](../docs/anima-xdna-reproducibility.md).
+
 ComfyUI still executes:
 
 - Qwen 3 0.6B tokenization and the Anima LLM adapter

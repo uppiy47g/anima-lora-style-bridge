@@ -1,0 +1,122 @@
+{
+  "$schema": "./anima-xdna-evidence.schema.json",
+  "schema_version": 1,
+  "recorded_date": "2026-10-02",
+  "source_commits": {
+    "linear": "a37158b",
+    "block": "1f4db24",
+    "resident_chain": "f5f7a4c",
+    "packed_cache": "ae427d7",
+    "comfyui_wrapper": "737338d76bf2a7dcf9806aaba5d6d936499b95ab",
+    "comfyui": "170594057a22673349ddf0a3d88624b7fa5865bb"
+  },
+  "tested_system": {
+    "hardware": "AMD Ryzen AI 9 365 / Strix XDNA 2",
+    "target": "npu2 / AIE2P",
+    "python": "3.13.9",
+    "torch": "2.14.1+cpu",
+    "triton_xdna": "3.6.0.2026093004+75679dc",
+    "xrt_sdk": "2.21.75",
+    "model": "Anima Base v1.0",
+    "shape": {
+      "latent": [1, 16, 1, 64, 64],
+      "output_pixels": [512, 512],
+      "context": [1, 512, 1024]
+    }
+  },
+  "boundary": {
+    "npu": "All transformer-block Linear and QK/AV GEMMs",
+    "cpu": "Qwen, patch/time/RoPE preparation, norms, softmax, GELU, gates/residuals, final layer/unpatchify, sampler, and VAE",
+    "onnx": false,
+    "vitis_ai_ep": false,
+    "silent_fallback": false
+  },
+  "measurements": {
+    "single_block": {
+      "status": "measured",
+      "max_abs_error": 0.0009765625,
+      "mean_abs_error": 0.00002131443
+    },
+    "resident_block": {
+      "status": "measured",
+      "dispatches_before": 83,
+      "dispatches_after": 23,
+      "h2d_bytes_before": 612237312,
+      "h2d_bytes_after": 156631040,
+      "d2h_bytes_before": 314048512,
+      "d2h_bytes_after": 0,
+      "representative_wall_ms": 252.4
+    },
+    "chain_28": {
+      "status": "measured",
+      "dispatches": 644,
+      "steady_seconds": [7.02, 7.03, 7.15],
+      "cpu_oracle_seconds": 23.19,
+      "final_normalized_rms_error": 0.007466678,
+      "worst_block": 13,
+      "worst_block_normalized_rms_error": 0.041646643
+    },
+    "packed_cache": {
+      "status": "measured",
+      "tensor_count": 644,
+      "logical_source_bytes": 3875565568,
+      "packed_bytes": 3963645952,
+      "padding_bytes": 88080384,
+      "cold_build_seconds_range": [19.834, 19.865],
+      "new_process_warm_seconds_range": [4.330, 4.546],
+      "cached_uncached_output": "bitwise equal"
+    },
+    "comfyui": {
+      "status": "measured",
+      "synthetic_complete_dit_normalized_rms": 0.01528,
+      "real_prompt_one_step_cfg_3_5_normalized_rms": 0.04067577049136162,
+      "real_prompt_two_step_cfg_1_0_normalized_rms": 0.018186910077929497,
+      "image_psnr_db": 36.3279,
+      "image_ssim": 0.845809,
+      "cold_wrapper_seconds": 26.730524,
+      "warm_wrapper_seconds": 7.729242,
+      "warm_chain_seconds": 7.566865,
+      "warm_weight_population_bytes": 0,
+      "warm_resident_hits": 644
+    },
+    "user_observation_20_step": {
+      "status": "observational_non_controlled",
+      "total_seconds": 533.94,
+      "seconds_per_iteration": 25.59,
+      "benchmark": false,
+      "caveat": "Insufficient workflow and instrumentation metadata for a controlled benchmark."
+    }
+  },
+  "image_conditions": {
+    "status": "measured",
+    "prompt": "a cheerful anime girl under cherry blossoms, detailed illustration, soft daylight",
+    "negative_prompt": "worst quality, low quality, blurry, jpeg artifacts",
+    "seed": 424242,
+    "sampler": "Euler",
+    "steps": 2,
+    "cfg": 1.0,
+    "width": 512,
+    "height": 512,
+    "provenance": "Produced by the project's isolated reference and XDNA validation run; pixel data re-saved without PNG metadata."
+  },
+  "artifacts": [
+    {
+      "path": "docs/assets/comfyui-reference-2step.png",
+      "bytes": 352110,
+      "sha256": "3441322d3c6100984ca9d1b09aaaf32d1fda95d5ce61b7c6e1f842c835a57f76",
+      "width": 512,
+      "height": 512,
+      "mode": "RGB",
+      "metadata_entries": 0
+    },
+    {
+      "path": "docs/assets/comfyui-xdna-2step.png",
+      "bytes": 353879,
+      "sha256": "f108b7631be8986507dc58398b9fc75583ffc0d554bfc50f06e56d8e08a63788",
+      "width": 512,
+      "height": 512,
+      "mode": "RGB",
+      "metadata_entries": 0
+    }
+  ]
+}

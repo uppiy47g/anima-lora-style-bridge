@@ -1,0 +1,14 @@
+# Copy this file outside the repository, replace the placeholders, and pass it
+# to ComfyUI with --extra-model-paths-config. Do not edit a Desktop-generated
+# configuration or place packed caches inside a model directory.
+shared_models:
+  base_path: <SHARED_MODEL_ROOT>
+  diffusion_models: diffusion_models
+  text_encoders: text_encoders
+  vae: vae
+
+secondary_models:
+  base_path: <OPTIONAL_SECOND_MODEL_ROOT>
+  diffusion_models: diffusion_models
+  text_encoders: text_encoders
+  vae: vae

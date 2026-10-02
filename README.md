@@ -3,6 +3,35 @@
 SDXL向けLoRAが生じさせる活性差分を、通常のAnima LoRAへ蒸留するための
 実験的な変換ツールです。従来の重み近似変換も引き続き利用できます。
 
+## Anima on AMD XDNA 2
+
+This branch also contains a separately scoped, Windows-first Anima Base v1.0
+backend for AMD XDNA 2. It executes the 28 DiT transformer blocks through
+Triton-XDNA/XRT directly from safetensors. It does **not** use ONNX or Vitis AI
+EP, and it never silently falls back to the reference block loop.
+
+The validated setup is **CPU-hybrid, not NPU-only**. XDNA executes all
+Linear/QK/AV GEMMs in the 28 blocks. Qwen, patch/time/RoPE preparation,
+normalization, softmax, GELU, residual operations, the sampler, final
+projection, and VAE remain on the CPU. Incidental display-GPU activity is not
+model acceleration. Task Manager's NPU percentage is also not a direct AIE
+utilization counter.
+
+Public verification resources:
+
+- [Reproducibility and technical report](docs/anima-xdna-reproducibility.md)
+- [ComfyUI node guide](comfyui_xdna_nodes/README.md)
+- [Low-level Linear/block/chain guide](anima_xdna_poc/README.md)
+- [Sanitized measurement evidence](docs/evidence/anima-xdna-validated.json)
+- [Launcher and model-path examples](examples/run_comfyui_xdna.ps1)
+- [Minimal ComfyUI API insertion example](examples/anima_xdna_512_api.json)
+
+As of **2026-10-02**, a GitHub and general-web search did not surface another
+publicly documented Anima-specific, end-to-end XDNA/XDNA 2 image-generation
+demo using Triton-XDNA. This is a dated search result, not proof that none
+exists and not an absolute “world first” claim. Generic Triton-XDNA kernels
+and non-Anima Ryzen AI Stable Diffusion demos do exist.
+
 > [!WARNING]
 > このツールは異なるモデル構造間で重みを近似移植します。元LoRAの見た目や
 > 挙動を完全に再現するものではありません。変換結果は必ず手元で確認してください。
@@ -58,8 +87,8 @@ Windows XDNA 2環境では、同梱の
 未知のComfyUI APIはsilent ignoreせず拒否します。
 
 導入、必要な2種類のcheckpoint、対応境界、diagnostics、unload方法および実機
-測定値は[`comfyui_xdna_nodes/README.md`](comfyui_xdna_nodes/README.md)を
-参照してください。
+測定値は[再現レポート](docs/anima-xdna-reproducibility.md)と
+[`comfyui_xdna_nodes/README.md`](comfyui_xdna_nodes/README.md)を参照してください。
 
 ## 使い方
 

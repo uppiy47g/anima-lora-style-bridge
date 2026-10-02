@@ -17,6 +17,16 @@ __pycache__/
 venv/
 build/
 dist/
+*.log
+
+# Local XDNA/ComfyUI runtime artifacts
+.triton/
+.xrt/
+.anima-xdna-cache/
+extra_model_paths.yaml
+run-xdna.local.ps1
+evidence-local/
+workflow-local*.json
 
 # Editors and operating systems
 .idea/

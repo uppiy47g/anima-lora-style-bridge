@@ -114,16 +114,18 @@ without a global encoding change.
 ## Commands and output
 
 ```powershell
-$env:XRT_DEV_DIR = "$env:LOCALAPPDATA\AMD\xrt-2.21.75"
+$env:XRT_DEV_DIR = "<XRT_SDK_DIR>"
+$checkpoint = "<DIFFUSERS_TRANSFORMER_SAFETENSORS>"
+$fixture = "<OPTIONAL_CAPTURED_BLOCK_INPUT_PT>"
 anima-xdna-probe
-anima-xdna-linear D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
-anima-xdna-block D:\models\Anima\transformer\diffusion_pytorch_model.safetensors `
+anima-xdna-linear $checkpoint
+anima-xdna-block $checkpoint `
   --image-tokens 1024 --context-tokens 512 --runs 2
-anima-xdna-chain D:\models\Anima\transformer\diffusion_pytorch_model.safetensors `
-  --fixture C:\captures\anima-real-preblock.pt `
+anima-xdna-chain $checkpoint `
+  --fixture $fixture `
   --start-block 0 --end-block 28 --warmups 1 --runs 3 --profile
-anima-xdna-cache build D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
-anima-xdna-cache verify D:\models\Anima\transformer\diffusion_pytorch_model.safetensors
+anima-xdna-cache build $checkpoint
+anima-xdna-cache verify $checkpoint
 anima-xdna-cache list
 ```
 
@@ -268,25 +270,18 @@ tests cover Linear, stitched-versus-legacy block attention, the optimized
 23-dispatch block, resident reuse, and the complete 28-block numerical chain:
 
 ```powershell
-$env:ANIMA_XDNA_CHECKPOINT = "D:\models\Anima\transformer\diffusion_pytorch_model.safetensors"
-$env:ANIMA_XDNA_CHAIN_FIXTURE = "C:\captures\anima-real-preblock.pt"
+$env:ANIMA_XDNA_CHECKPOINT = "<DIFFUSERS_TRANSFORMER_SAFETENSORS>"
+$env:ANIMA_XDNA_CHAIN_FIXTURE = "<CAPTURED_BLOCK_INPUT_PT>"
 python -m unittest discover -s tests -v
 ```
 
 Without those variables or the toolchain, hardware tests skip with the precise
 missing boundary.
 
-This is not yet a ComfyUI backend or full image generator. Patch/time embedding
-and the 28-block adapter are validated separately rather than wired into the
-ComfyUI sampler. LoRA application, real Qwen prompt-conditioning capture,
-output norm/projection, VAE decoding, diffusion-step scheduling, and
-multi-step buffer ownership remain outside this prototype. Host normalization,
-softmax, GELU, gates, and residuals still expose mapped buffers to PyTorch and
-require cache synchronization; the reported H2D figure is bytes copied into
-mapped BO pages on a unified-memory APU, not necessarily physical DRAM traffic.
-
-The next milestone is a ComfyUI MODEL wrapper that owns one resident session
-across diffusion steps, applies checkpoint-compatible LoRAs before BO
-population, captures real pipeline conditioning, and then moves the remaining
-normalization/softmax/elementwise stages onto AIE to reduce the 23 dispatches
-and mapped-memory synchronization further.
+The low-level CLIs remain independently useful, while the current
+[`comfyui_xdna_nodes`](../comfyui_xdna_nodes/README.md) package now integrates
+the resident chain into ComfyUI. Host normalization, softmax, GELU, gates, and
+residuals still expose mapped buffers to PyTorch and require cache
+synchronization; the reported H2D figure is bytes copied into mapped BO pages
+on a unified-memory APU, not necessarily physical DRAM traffic. LoRA and INT8
+remain intentionally unsupported.

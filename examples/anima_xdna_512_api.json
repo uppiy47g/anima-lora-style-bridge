@@ -13,7 +13,7 @@
         "1",
         0
       ],
-      "checkpoint": "C:\\path\\to\\Anima-Base-v1.0-Diffusers\\transformer\\diffusion_pytorch_model.safetensors",
+      "checkpoint": "<DIFFUSERS_TRANSFORMER_SAFETENSORS>",
       "rebuild_cache": false,
       "cache_dir": ""
     }

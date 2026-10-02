@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/uppiy47g/anima-lora-style-bridge/docs/evidence/anima-xdna-evidence.schema.json",
+  "title": "Anima XDNA validation evidence",
+  "type": "object",
+  "required": ["schema_version", "source_commits", "tested_system", "boundary", "measurements", "artifacts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_commits": {"type": "object"},
+    "tested_system": {"type": "object"},
+    "boundary": {"type": "object"},
+    "measurements": {"type": "object"},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "bytes", "sha256", "width", "height", "metadata_entries"],
+        "properties": {
+          "path": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "width": {"const": 512},
+          "height": {"const": 512},
+          "metadata_entries": {"const": 0}
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}
