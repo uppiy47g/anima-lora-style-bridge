@@ -1,8 +1,8 @@
-# Anima Base v1.0 on AMD XDNA 2: reproducibility report
+# Anima Base v1.0 and Turbo V1.1 on AMD XDNA 2
 
 ## Scope and claim
 
-This repository demonstrates Anima Base v1.0 image generation with its 28 DiT
+This repository demonstrates Anima Base v1.0 and Turbo V1.1 image generation with their 28 DiT
 transformer blocks accelerated on AMD XDNA 2 through Triton-XDNA and XRT.
 Safetensors remain the read-only source of truth. No ONNX conversion, Vitis AI
 Execution Provider, or converted distributable model is used.
@@ -32,7 +32,7 @@ This dated, non-exhaustive search is not an absolute novelty claim.
 | XRT SDK | 2.21.75 |
 | ComfyUI | `170594057a22673349ddf0a3d88624b7fa5865bb` |
 | Wrapper source | `737338d76bf2a7dcf9806aaba5d6d936499b95ab` |
-| Model | Anima Base v1.0, BF16 |
+| Models | Anima Base v1.0 and Turbo V1.1, BF16 |
 | Shape | batch 1, latent `[1,16,1,64,64]`, 512×512, context `[1,512,1024]` |
 
 The exact structured measurements and artifact digests are in
@@ -46,7 +46,7 @@ native final layer and unpatchify. The resident runtime keeps XRT device,
 contexts, kernels, weights, and reusable BOs alive across denoising steps.
 It performs 23 dispatches per block and 644 for all 28 blocks.
 
-Two different files are required:
+Base may use two different files:
 
 1. Native ComfyUI `anima-base-v1.0.safetensors`, selected in `UNETLoader`.
 2. Diffusers Base transformer `transformer/diffusion_pytorch_model.safetensors`,
@@ -55,6 +55,18 @@ Two different files are required:
 The second file supplies exact block weights to the packed cache. It does not
 replace the native ComfyUI checkpoint. Model weights are not included here.
 Review the model licenses and obtain both files from their authorized source.
+
+Turbo uses its full native V1.1 checkpoint for both `UNETLoader` and the XDNA
+`checkpoint` input. Supported schemas are Diffusers `transformer_blocks.*`,
+native Base `net.*`, and native Turbo `model.diffusion_model.*`. The wrapper
+computes a canonical full digest of ordered key, dtype, shape, and every byte
+of all 560 consumed tensors. MODEL/source disagreement is rejected before XRT
+opens or any weight BO is populated; Base and Turbo packed payloads cannot be
+mixed. The validated canonical fingerprints are
+`083d6f88949dec38ec35579dfd16ae96f4d453074b4fdfb6c0ed965c9cd76757`
+for Base and
+`066b4281037504b1b7200ecd65b4182fc765ed882ecd5ca650db7308246a8dee`
+for Turbo.
 
 ## Isolated Windows setup
 
@@ -97,10 +109,10 @@ additional arguments. The XDNA runtime remains available through
 
 ## ComfyUI wiring
 
-Load the native Base MODEL with `UNETLoader`, then insert
+Load the native Base or Turbo MODEL with `UNETLoader`, then insert
 `Anima XDNA 2 / Load/Attach Anima XDNA Model` between its MODEL output and the
-normal sampler MODEL input. Set `checkpoint` to the Diffusers transformer
-safetensors. Leave `rebuild_cache=false`; leave `cache_dir` empty for
+normal sampler MODEL input. Set `checkpoint` to the matching Base source or
+the same native Turbo checkpoint. Leave `rebuild_cache=false`; leave `cache_dir` empty for
 `%USERPROFILE%\.cache\anima-xdna\weights`, or use another user-owned ASCII
 directory. Connect the wrapped MODEL to `Anima XDNA Runtime Status` when
 collecting evidence. `Unload Anima XDNA Runtime` releases the attachment
@@ -108,8 +120,9 @@ before a model switch.
 
 The API JSON in [`../examples/anima_xdna_512_api.json`](../examples/anima_xdna_512_api.json)
 is a minimal insertion/status fragment, not a redistributable model workflow.
-Replace `<DIFFUSERS_TRANSFORMER_SAFETENSORS>` locally and merge the fragment
-into the standard native Anima Base workflow. Prompt conditioning must use
+Replace `<MATCHING_BASE_OR_TURBO_SAFETENSORS>` locally and merge the fragment
+into the standard native Anima workflow. Select `base` or `turbo` placeholders
+without mixing their sources. Prompt conditioning must use
 Qwen 3 0.6B and decoding must use Qwen Image VAE.
 
 ## Packed cache and cold/warm behavior
@@ -128,6 +141,13 @@ once per process. A second wrapper call reused all 644 residents with zero
 weight population and took 7.73 s total versus 26.73 s for the isolated cold
 call.
 
+Turbo uses the same 644-record layout but a distinct payload/cache identity:
+cache key `932742447a74a7168f87fb63b59f8bd0d97bc998e627dcd01731513dabb1a94c`.
+Its measured cold fingerprint/pack/total were 6.833/13.831/21.271 s; a new
+process warm source check/payload verification/total were 0.030/3.744/3.853 s.
+Of 448 block Linear tensors, all differ from Base; the 112 RMSNorm vectors
+match. Therefore kernels/layouts are reusable but payloads are not.
+
 ## Correctness and performance evidence
 
 | Gate | Result |
@@ -140,6 +160,29 @@ call.
 | Real prompt, one step, CFG 3.5 normalized RMS | 0.04067577 |
 | Real prompt, two steps, CFG 1.0 normalized RMS | 0.01818691 |
 | Decoded image PSNR / SSIM | 36.3279 dB / 0.845809 |
+
+Turbo V1.1 adds these controlled gates:
+
+| Gate | Result |
+|---|---:|
+| Block 0 max / mean absolute error | 0.0009765625 / 0.0000213457 |
+| Block 0 XRT dispatches | 23 |
+| 28-block CPU / XDNA validation chain | 26.406 / 17.228 s |
+| First / resident 28-block chain | 18.263 / 7.212 s |
+| Resident dispatches / hits / weight population | 644 / 644 / 0 B |
+| Worst transient / final normalized RMS | 0.0845512 (block 13) / 0.01003999 |
+| Real Qwen one-step latent normalized RMS | 0.02649816 |
+| 8-step image PSNR / SSIM / 8-bit MAE | 19.8551 dB / 0.824799 / 10.8841 |
+| First / second 8-step workflow wall | 139.75 / 136.47 s |
+
+Turbo's sparse high-magnitude activations amplify BF16 differences around
+blocks 12-19, then recover. This is not hidden by widening Base's gate. Turbo
+uses a separately declared 10% worst-intermediate ceiling and 2% final ceiling,
+plus the strict single-block, real one-step, and decoded-image gates. The
+second workflow reused the resident attachment and cached upstream nodes; no
+kernel compilation occurred. Per-step logs fell from 28.77 s on the first
+step to about 11.8-12.0 s steady. Workflow wall includes Qwen/model loading,
+host stages, sampler, and VAE and is not an NPU-only benchmark.
 
 Chain steady timings used one warmup followed by three measured repeats and
 exclude the one-time stitched-kernel compile. The CPU oracle used the same
@@ -156,6 +199,15 @@ recorded in the evidence JSON. The metadata-free outputs are:
 |---|---|
 | ![Reference](assets/comfyui-reference-2step.png) | ![XDNA](assets/comfyui-xdna-2step.png) |
 
+The Turbo evidence used the same documented prompt/seed, Euler, CFG 1,
+`simple`, and eight steps. Local V1.1 metadata contained no sampler
+recommendation; this is a locally validated setting initially informed by
+local V1.0 guidance, not an official V1.1 recommendation.
+
+| Turbo CPU reference | Turbo XDNA |
+|---|---|
+| ![Turbo reference](assets/anima-turbo-v11-reference-8step.png) | ![Turbo XDNA](assets/anima-turbo-v11-xdna-8step.png) |
+
 A later user-observed 20-step run reported 533.94 s total and 25.59 s/it.
 It lacked enough controlled metadata and instrumentation to be a benchmark.
 Likewise, a low Task Manager NPU percentage is not an AIE utilization
@@ -169,7 +221,7 @@ Set placeholders only in the current shell; do not commit paths or captures.
 ```powershell
 $env:XRT_DEV_DIR = "<XRT_SDK_DIR>"
 $env:ANIMA_XDNA_CHECKPOINT = "<DIFFUSERS_TRANSFORMER_SAFETENSORS>"
-$env:ANIMA_XDNA_CHAIN_FIXTURE = "<OPTIONAL_CAPTURED_BLOCK_INPUT_PT>"
+$env:ANIMA_XDNA_CHAIN_FIXTURE = "<CAPTURED_REAL_BLOCK_INPUT_PT>"
 ```
 
 1. **Dependency/device probe:** `anima-xdna-probe`
@@ -184,20 +236,24 @@ $env:ANIMA_XDNA_CHAIN_FIXTURE = "<OPTIONAL_CAPTURED_BLOCK_INPUT_PT>"
    Pass: 23-dispatch block satisfies its numerical gate.
 5. **28-block chain:**
    `anima-xdna-chain $env:ANIMA_XDNA_CHECKPOINT --fixture $env:ANIMA_XDNA_CHAIN_FIXTURE --start-block 0 --end-block 28 --warmups 1 --runs 3 --profile`
-   Pass: 644 dispatches and every block remains below the fixed 5% normalized-RMS gate.
+   Base pass: 644 dispatches and every block remains below 5% normalized RMS.
+   Turbo pass: append `--max-block-nrms 0.10 --max-final-nrms 0.02`; both
+   reported gates must pass using a captured real preprocessing fixture.
+   Turbo's default synthetic seed-0 input is not covered and was correctly
+   rejected at 9.61% final normalized RMS.
 6. **ComfyUI registration:** start isolated ComfyUI, then:
    `Invoke-RestMethod http://127.0.0.1:8190/object_info/LoadAttachAnimaXDNAModel`
    Pass: object info returns category `Anima XDNA 2`; repeat for
    `AnimaXDNARuntimeStatus` and `AnimaXDNAUnload`.
-7. **Final image:** run the standard 512×512 Base workflow with the wrapper
+7. **Final image:** run the standard 512×512 Base or Turbo workflow with the wrapper
    insertion. Pass: status shows 644 NPU dispatches per non-CFG chain, a second
    call shows 644 resident hits and zero weight population, and an image is
    decoded without fallback.
 
 ## Limitations and troubleshooting
 
-Only Base v1.0 and the fixed shape above are validated. Preview/Aesthetic/Turbo
-full checkpoints, LoRA/LLLite/ModelPatcher transformer patches, INT8, training,
+Only Base v1.0, Turbo V1.1, and the fixed shape above are validated. Preview/Aesthetic
+checkpoints, LoRA/LLLite/ModelPatcher transformer patches, INT8, training,
 other resolutions, other context sizes, and user batches above one are
 rejected. CFG batch 2 is executed sequentially on the single-tenant NPU.
 
@@ -206,8 +262,9 @@ rejected. CFG batch 2 is executed sequentially on the single-tenant NPU.
 - **`NPU unavailable`:** verify Device Manager/driver, `XRT_DEV_DIR`, and
   `anima-xdna-probe`. Do not substitute a CPU success.
 - **Compiler path/CP932 failure:** move checkout/cache to an ASCII user path.
-- **Checkpoint mismatch:** distinguish the native ComfyUI MODEL from the
-  Diffusers transformer source.
+- **Checkpoint mismatch:** choose the exact matching Base source, or use the
+  same native Turbo file for MODEL and XDNA source. The full digest check is
+  intentionally expensive once per attachment and cannot be disabled.
 - **Unsupported patches:** remove LoRA/LLLite; they are rejected rather than
   ignored.
 - **Cache corruption:** run `anima-xdna-cache verify <checkpoint>`, then an

@@ -4,6 +4,7 @@ import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from comfyui_xdna_nodes.model_wrapper import (
     ATTACHMENT_KEY,
@@ -90,9 +91,10 @@ class ComfyUIXDNAWrapperTests(unittest.TestCase):
             checkpoint = Path(temporary, "model.safetensors")
             checkpoint.write_bytes(b"fixture")
             source = FakePatcher()
-            attached, status = LoadAttachAnimaXDNAModel().attach(
-                source, str(checkpoint), False
-            )
+            with mock.patch.object(SharedRuntime, "prepare"):
+                attached, status = LoadAttachAnimaXDNAModel().attach(
+                    source, str(checkpoint), False
+                )
             self.assertIsNot(attached, source)
             self.assertEqual(source.wrappers, {})
             self.assertIn("created", status)
@@ -103,6 +105,29 @@ class ComfyUIXDNAWrapperTests(unittest.TestCase):
             attachment = attached.get_attachment(ATTACHMENT_KEY)
             self.assertIsInstance(attachment, RuntimeAttachment)
             attachment.cleanup()
+
+    def test_identity_mismatch_closes_before_runtime_open(self):
+        runtime = SharedRuntime(Path("fixture.safetensors"))
+        chain = mock.Mock()
+        chain.source_identity = {
+            "schema": "native-model-diffusion-model",
+            "block_fingerprint": "source",
+        }
+        chain.cache_status = None
+        with (
+            mock.patch(
+                "comfyui_xdna_nodes.model_wrapper.AnimaXDNAChainRuntime",
+                return_value=chain,
+            ),
+            mock.patch(
+                "comfyui_xdna_nodes.model_wrapper.fingerprint_model_blocks",
+                return_value=("model", "comfyui-anima-module"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "MODEL/checkpoint mismatch"),
+        ):
+            runtime.prepare(Anima())
+        chain.prepare_weight_cache.assert_called_once()
+        chain.close.assert_called_once()
 
     def test_clones_share_runtime_with_reference_counted_attachments(self):
         runtime = SharedRuntime(Path("fixture.safetensors"))

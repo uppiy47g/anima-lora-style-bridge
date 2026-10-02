@@ -122,6 +122,68 @@ def load_block_config(path: Path) -> AnimaBlockConfig:
     return config
 
 
+def infer_native_block_config(checkpoint_path: Path) -> AnimaBlockConfig:
+    from .checkpoint_schema import detect_checkpoint_schema
+
+    path = Path(checkpoint_path)
+    try:
+        with safe_open(path, framework="pt", device="cpu") as checkpoint:
+            schema = detect_checkpoint_schema(checkpoint.keys(), range(1))
+            mapping = schema.canonical_to_source
+            shapes = {
+                key: tuple(checkpoint.get_slice(source).get_shape())
+                for key, source in mapping.items()
+            }
+    except UnsupportedTensor:
+        raise
+    except Exception as error:
+        raise UnsupportedTensor(
+            f"cannot inspect native Anima checkpoint {path}: {error}"
+        ) from error
+    expected = {
+        "transformer_blocks.0.attn1.to_q.weight": (2048, 2048),
+        "transformer_blocks.0.attn1.norm_q.weight": (128,),
+        "transformer_blocks.0.attn2.to_k.weight": (2048, 1024),
+        "transformer_blocks.0.norm1.linear_1.weight": (256, 2048),
+        "transformer_blocks.0.norm1.linear_2.weight": (6144, 256),
+        "transformer_blocks.0.ff.net.0.proj.weight": (8192, 2048),
+        "transformer_blocks.0.ff.net.2.weight": (2048, 8192),
+    }
+    mismatches = [
+        f"{key}: {shapes.get(key)} != {shape}"
+        for key, shape in expected.items()
+        if shapes.get(key) != shape
+    ]
+    if mismatches:
+        raise UnsupportedTensor(
+            "native checkpoint is not the validated Anima 2B architecture: "
+            + "; ".join(mismatches)
+        )
+    return AnimaBlockConfig(
+        hidden_size=2048,
+        num_heads=16,
+        head_dim=128,
+        context_dim=1024,
+        adaln_dim=256,
+        mlp_dim=8192,
+        patch_size=(1, 2, 2),
+        rope_scale=(1.0, 4.0, 4.0),
+        max_size=(128, 240, 240),
+    )
+
+
+def load_checkpoint_config(
+    checkpoint_path: Path,
+    config_path: Path | None = None,
+) -> AnimaBlockConfig:
+    if config_path is not None:
+        return load_block_config(config_path)
+    adjacent = Path(checkpoint_path).parent / "config.json"
+    if adjacent.is_file():
+        return load_block_config(adjacent)
+    return infer_native_block_config(checkpoint_path)
+
+
 def _dimension_map(config: AnimaBlockConfig) -> dict[str, int]:
     return {
         "hidden": config.hidden_size,
@@ -141,6 +203,8 @@ def load_block_weights(
     path = Path(checkpoint_path)
     if not path.is_file():
         raise UnsupportedTensor(f"checkpoint does not exist or is not a file: {path}")
+    from .checkpoint_schema import detect_checkpoint_schema
+
     prefix = f"transformer_blocks.{block_index}."
     dimensions = _dimension_map(config)
     expected = {
@@ -154,21 +218,18 @@ def load_block_weights(
     try:
         with safe_open(path, framework="pt", device="cpu") as checkpoint:
             available = set(checkpoint.keys())
-            missing = [prefix + name for name in expected if prefix + name not in available]
-            if missing:
-                raise UnsupportedTensor(
-                    "checkpoint is not a supported Anima/Cosmos block; missing keys: "
-                    + ", ".join(missing)
-                )
+            schema = detect_checkpoint_schema(available, range(block_index, block_index + 1))
             for name, shape in expected.items():
-                tensor = checkpoint.get_tensor(prefix + name)
+                canonical_key = prefix + name
+                source_key = schema.canonical_to_source[canonical_key]
+                tensor = checkpoint.get_tensor(source_key)
                 if tuple(tensor.shape) != shape:
                     raise UnsupportedTensor(
-                        f"{prefix + name!r} has shape {tuple(tensor.shape)}, expected {shape}"
+                        f"{source_key!r} has shape {tuple(tensor.shape)}, expected {shape}"
                     )
                 if tensor.dtype not in (torch.bfloat16, torch.float16, torch.float32):
                     raise UnsupportedTensor(
-                        f"{prefix + name!r} has unsupported dtype {tensor.dtype}"
+                        f"{source_key!r} has unsupported dtype {tensor.dtype}"
                     )
                 tensors[name] = tensor.to(torch.bfloat16).contiguous()
     except UnsupportedTensor:

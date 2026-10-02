@@ -12,7 +12,7 @@ from .block_checkpoint import (
     AnimaBlockConfig,
     AnimaBlockWeights,
     LINEAR_SHAPES,
-    load_block_config,
+    load_checkpoint_config,
     load_block_weights,
 )
 from .errors import NumericalMismatch, UnsupportedTensor
@@ -71,8 +71,8 @@ class AnimaXDNAChainRuntime:
         rebuild_cache: bool = False,
     ):
         self.checkpoint = Path(checkpoint)
-        self.config: AnimaBlockConfig = load_block_config(
-            config or self.checkpoint.parent
+        self.config: AnimaBlockConfig = load_checkpoint_config(
+            self.checkpoint, config
         )
         self.cache_host_weights = cache_host_weights
         self.weight_cache_enabled = weight_cache
@@ -89,6 +89,20 @@ class AnimaXDNAChainRuntime:
         self._session = ResidentXDNASession()
         self._session.__enter__()
         return self
+
+    @property
+    def is_open(self) -> bool:
+        return self._session is not None
+
+    def prepare_weight_cache(self) -> Optional[CacheStatus]:
+        self._ensure_packed_cache(0, 28)
+        return self.cache_status
+
+    @property
+    def source_identity(self) -> Optional[dict]:
+        if self._packed_cache is None or self._packed_cache.manifest is None:
+            return None
+        return self._packed_cache.manifest["descriptor"]["source_identity"]
 
     def close(self):
         if self._session is not None:
@@ -228,6 +242,7 @@ class AnimaXDNAChainRuntime:
         start: int = 0,
         end: int = 28,
         max_normalized_rms_error: float = 5e-2,
+        max_final_normalized_rms_error: Optional[float] = None,
     ) -> ChainValidation:
         self._validate_range(start, end)
         if self._session is None:
@@ -283,6 +298,18 @@ class AnimaXDNAChainRuntime:
                 f"{max_normalized_rms_error:.4g} at block {worst.index}: "
                 f"{worst.normalized_rms_error:.6g} "
                 f"(max_abs={worst.max_abs_error:.6g})"
+            )
+        final_limit = (
+            max_normalized_rms_error
+            if max_final_normalized_rms_error is None
+            else max_final_normalized_rms_error
+        )
+        final = errors[-1]
+        if final.normalized_rms_error > final_limit:
+            raise NumericalMismatch(
+                f"final normalized RMS error exceeded {final_limit:.4g} at "
+                f"block {final.index}: {final.normalized_rms_error:.6g} "
+                f"(max_abs={final.max_abs_error:.6g})"
             )
         return ChainValidation(
             ChainResult(cpu_hidden, tuple(cpu_profiles)),

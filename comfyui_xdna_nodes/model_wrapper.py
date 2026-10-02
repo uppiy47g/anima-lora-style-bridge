@@ -14,6 +14,10 @@ import torch
 
 from anima_xdna_poc.block import BlockInputs, rotary_embedding
 from anima_xdna_poc.chain import AnimaXDNAChainRuntime
+from anima_xdna_poc.checkpoint_schema import (
+    fingerprint_model_blocks,
+    validated_variant,
+)
 from anima_xdna_poc.errors import PrototypeError, UnsupportedTensor
 
 
@@ -30,6 +34,7 @@ class RuntimeDiagnostics:
     chain_runs: int = 0
     resident_reuses: int = 0
     cold_setup_ms: float = 0.0
+    identity_check_ms: float = 0.0
     first_call_total_ms: float = 0.0
     first_chain_ms: float = 0.0
     last_total_ms: float = 0.0
@@ -47,6 +52,11 @@ class RuntimeDiagnostics:
     last_weight_population_bytes: int = 0
     last_error: Optional[str] = None
     cache: Optional[dict[str, Any]] = None
+    source_schema: Optional[str] = None
+    source_fingerprint: Optional[str] = None
+    model_schema: Optional[str] = None
+    model_fingerprint: Optional[str] = None
+    model_variant: Optional[str] = None
 
 
 class SharedRuntime:
@@ -68,6 +78,60 @@ class SharedRuntime:
         self._lock = threading.RLock()
         self.diagnostics = RuntimeDiagnostics()
 
+    def prepare(self, diffusion_model) -> None:
+        with self._lock:
+            if self._runtime is not None:
+                return
+            started = time.perf_counter()
+            runtime = AnimaXDNAChainRuntime(
+                self.checkpoint,
+                cache_host_weights=False,
+                weight_cache=True,
+                cache_dir=self.cache_dir,
+                rebuild_cache=self.rebuild_cache,
+            )
+            try:
+                runtime.prepare_weight_cache()
+                identity = runtime.source_identity
+                if identity is None:
+                    raise RuntimeError("packed cache did not expose source identity")
+                identity_started = time.perf_counter()
+                model_fingerprint, model_schema = fingerprint_model_blocks(diffusion_model)
+                identity_check_ms = (
+                    time.perf_counter() - identity_started
+                ) * 1000
+                source_fingerprint = identity["block_fingerprint"]
+                if model_fingerprint != source_fingerprint:
+                    raise RuntimeError(
+                        "Anima MODEL/checkpoint mismatch: the connected MODEL "
+                        "does not contain the same 28-block weights as the XDNA "
+                        f"source (MODEL {model_fingerprint[:16]}..., source "
+                        f"{source_fingerprint[:16]}...). Select the matching "
+                        "Base or Turbo checkpoint; no dispatch was attempted."
+                    )
+            except BaseException:
+                runtime.close()
+                raise
+            self._runtime = runtime
+            self.diagnostics.cold_setup_ms = (
+                time.perf_counter() - started
+            ) * 1000
+            self.diagnostics.identity_check_ms = identity_check_ms
+            self.diagnostics.state = "prepared"
+            self.diagnostics.source_schema = identity["schema"]
+            self.diagnostics.source_fingerprint = source_fingerprint
+            self.diagnostics.model_schema = model_schema
+            self.diagnostics.model_fingerprint = model_fingerprint
+            self.diagnostics.model_variant = validated_variant(source_fingerprint)
+            self.diagnostics.cache = (
+                {
+                    **asdict(runtime.cache_status),
+                    "path": str(runtime.cache_status.path),
+                }
+                if runtime.cache_status is not None
+                else None
+            )
+
     def acquire(self):
         with self._lock:
             if self._refs <= 0:
@@ -84,19 +148,9 @@ class SharedRuntime:
     def open(self) -> AnimaXDNAChainRuntime:
         with self._lock:
             if self._runtime is None:
-                started = time.perf_counter()
-                runtime = AnimaXDNAChainRuntime(
-                    self.checkpoint,
-                    cache_host_weights=False,
-                    weight_cache=True,
-                    cache_dir=self.cache_dir,
-                    rebuild_cache=self.rebuild_cache,
-                )
-                runtime.__enter__()
-                self._runtime = runtime
-                self.diagnostics.cold_setup_ms = (
-                    time.perf_counter() - started
-                ) * 1000
+                raise RuntimeError("Anima XDNA runtime was not identity-bound")
+            if not self._runtime.is_open:
+                self._runtime.__enter__()
                 self.diagnostics.state = "open"
             return self._runtime
 
@@ -114,7 +168,9 @@ class SharedRuntime:
                 {
                     "checkpoint": str(self.checkpoint),
                     "reference_count": self._refs,
-                    "runtime_open": self._runtime is not None,
+                    "runtime_open": (
+                        self._runtime is not None and self._runtime.is_open
+                    ),
                     "supported_shape": list(SUPPORTED_SHAPE),
                     "replacement_boundary": (
                         "after ComfyUI patch/time/Qwen/RoPE preprocessing; "
@@ -384,7 +440,7 @@ def _validate_patcher(model):
     if getattr(model, "patches", None):
         raise RuntimeError(
             "Anima XDNA does not support LoRA/model weight patches yet. "
-            "Attach it directly to the unpatched Base v1.0 MODEL."
+            "Attach it directly to an unpatched Base v1.0 or Turbo V1.1 MODEL."
         )
     transformer_options = getattr(model, "model_options", {}).get(
         "transformer_options", {}
@@ -441,6 +497,11 @@ class LoadAttachAnimaXDNAModel:
             Path(cache_dir) if cache_dir.strip() else None,
             rebuild_cache,
         )
+        try:
+            runtime.prepare(model.model.diffusion_model)
+        except Exception:
+            runtime.close()
+            raise
         attachment = RuntimeAttachment(runtime)
         patched.set_attachments(ATTACHMENT_KEY, attachment)
         try:

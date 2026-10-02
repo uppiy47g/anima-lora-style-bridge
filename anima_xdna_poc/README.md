@@ -26,11 +26,11 @@ read-only source of truth. Native Triton cache entries contain compiled
 kernels; the separate packed-weight cache described below is a verified,
 regenerable local derivative and is never a replacement model.
 
-Positive compatibility is currently limited to the full **Anima Base v1.0
-Diffusers** checkpoint. Locally discovered Aesthetic and Turbo files are LoRA
-adapters over Base, not independent full transformer checkpoints. Their block
-shape appears inherited from Base, but LoRA application is not implemented in
-this milestone.
+Positive compatibility covers full BF16 **Anima Base v1.0** checkpoints in
+Diffusers `transformer_blocks.*` or native `net.*` form and the validated full
+native **Turbo V1.1** checkpoint in `model.diffusion_model.*` form. The loader
+canonicalizes all 560 block tensors, while the cache manifest retains every
+exact source key. LoRA adapters and quantized checkpoints remain unsupported.
 
 ## NPU, attention fusion, and residency
 
@@ -115,7 +115,7 @@ without a global encoding change.
 
 ```powershell
 $env:XRT_DEV_DIR = "<XRT_SDK_DIR>"
-$checkpoint = "<DIFFUSERS_TRANSFORMER_SAFETENSORS>"
+$checkpoint = "<MATCHING_BASE_OR_TURBO_SAFETENSORS>"
 $fixture = "<OPTIONAL_CAPTURED_BLOCK_INPUT_PT>"
 anima-xdna-probe
 anima-xdna-linear $checkpoint
@@ -124,6 +124,11 @@ anima-xdna-block $checkpoint `
 anima-xdna-chain $checkpoint `
   --fixture $fixture `
   --start-block 0 --end-block 28 --warmups 1 --runs 3 --profile
+# Turbo's validated policy reports its bounded transient amplification while
+# retaining a strict final-output gate:
+anima-xdna-chain "<TURBO_V11_SAFETENSORS>" `
+  --fixture "<CAPTURED_REAL_PREBLOCK_INPUT_PT>" `
+  --start-block 0 --end-block 28 --max-block-nrms 0.10 --max-final-nrms 0.02
 anima-xdna-cache build $checkpoint
 anima-xdna-cache verify $checkpoint
 anima-xdna-cache list
@@ -176,6 +181,13 @@ coverage: the deterministic block integration still compares elementwise with
 `rtol=0.02`, `atol=0.003`. The CPU adapter was also checked against the
 installed Diffusers 0.39.0 authoritative 28-block chain and ended at about
 0.7% normalized RMS difference.
+
+Turbo's separate 10% intermediate / 2% final chain gate is defined for the
+captured real preprocessing fixture used by the ComfyUI validation. The
+default synthetic seed-0 input is deliberately outside that claim and was
+rejected at 9.61% final normalized RMS. Always pass a real captured fixture
+when reproducing the Turbo chain gate; the real one-step ComfyUI sampler test
+is the end-to-end oracle.
 
 Failures use distinct categories and exit codes: dependency unavailable (2),
 NPU unavailable (3), unsupported shape/config/dtype (4), compilation failure

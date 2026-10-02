@@ -42,6 +42,19 @@ class PublicReleaseTests(unittest.TestCase):
             evidence["measurements"]["user_observation_20_step"]["status"],
             "observational_non_controlled",
         )
+        turbo = evidence["measurements"]["turbo_v1_1"]
+        self.assertNotEqual(
+            turbo["source_block_fingerprint"],
+            turbo["base_block_fingerprint"],
+        )
+        self.assertLessEqual(
+            turbo["chain_28"]["worst_block_normalized_rms_error"],
+            turbo["chain_28"]["max_block_gate"],
+        )
+        self.assertLessEqual(
+            turbo["chain_28"]["final_normalized_rms_error"],
+            turbo["chain_28"]["final_gate"],
+        )
         for artifact in evidence["artifacts"]:
             path = ROOT / artifact["path"]
             payload, width, height, color_type, metadata_entries = read_png(path)
@@ -60,7 +73,7 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertEqual(workflow["3"]["class_type"], "AnimaXDNARuntimeStatus")
         self.assertEqual(
             workflow["2"]["inputs"]["checkpoint"],
-            "<DIFFUSERS_TRANSFORMER_SAFETENSORS>",
+            "<MATCHING_BASE_OR_TURBO_SAFETENSORS>",
         )
         launcher = (ROOT / "examples" / "run_comfyui_xdna.ps1").read_text(encoding="utf-8")
         self.assertIn("--cpu", launcher)

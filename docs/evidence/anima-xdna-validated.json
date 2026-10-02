@@ -8,6 +8,7 @@
     "resident_chain": "f5f7a4c",
     "packed_cache": "ae427d7",
     "comfyui_wrapper": "737338d76bf2a7dcf9806aaba5d6d936499b95ab",
+    "turbo_support": "commit containing this evidence record",
     "comfyui": "170594057a22673349ddf0a3d88624b7fa5865bb"
   },
   "tested_system": {
@@ -17,7 +18,7 @@
     "torch": "2.14.1+cpu",
     "triton_xdna": "3.6.0.2026093004+75679dc",
     "xrt_sdk": "2.21.75",
-    "model": "Anima Base v1.0",
+    "models": ["Anima Base v1.0", "Anima Turbo V1.1"],
     "shape": {
       "latent": [1, 16, 1, 64, 64],
       "output_pixels": [512, 512],
@@ -79,6 +80,60 @@
       "warm_weight_population_bytes": 0,
       "warm_resident_hits": 644
     },
+    "turbo_v1_1": {
+      "status": "measured",
+      "source_schema": "native-model-diffusion-model",
+      "source_block_fingerprint": "066b4281037504b1b7200ecd65b4182fc765ed882ecd5ca650db7308246a8dee",
+      "base_block_fingerprint": "083d6f88949dec38ec35579dfd16ae96f4d453074b4fdfb6c0ed965c9cd76757",
+      "cache_key": "932742447a74a7168f87fb63b59f8bd0d97bc998e627dcd01731513dabb1a94c",
+      "cache_cold_seconds": {
+        "fingerprint": 6.833,
+        "pack": 13.831,
+        "total": 21.271
+      },
+      "cache_warm_seconds": {
+        "source_validation": 0.030,
+        "payload_verification": 3.744,
+        "total": 3.853
+      },
+      "single_block": {
+        "dispatches": 23,
+        "max_abs_error": 0.0009765625,
+        "mean_abs_error": 0.0000213457
+      },
+      "chain_28": {
+        "cpu_oracle_seconds": 26.406,
+        "xdna_validation_seconds": 17.228,
+        "cold_resident_run_seconds": 18.2627362,
+        "warm_resident_run_seconds": 7.2120909,
+        "cold_weight_population_bytes": 3963617280,
+        "warm_weight_population_bytes": 0,
+        "warm_resident_hits": 644,
+        "warm_allocations": 0,
+        "dispatches": 644,
+        "worst_block": 13,
+        "worst_block_normalized_rms_error": 0.0845512,
+        "final_normalized_rms_error": 0.01003999,
+        "max_block_gate": 0.10,
+        "final_gate": 0.02,
+        "fixture": "Captured real Anima preprocessing tensors; not distributed",
+        "synthetic_seed_0_final_normalized_rms": 0.096141,
+        "synthetic_seed_0_status": "outside validated Turbo gate"
+      },
+      "comfyui": {
+        "one_step_reference_seconds": 32.026,
+        "one_step_xdna_seconds": 52.126,
+        "one_step_latent_normalized_rms": 0.026498155668377876,
+        "one_step_latent_max_abs": 0.15375906229019165,
+        "one_step_latent_mean_abs": 0.023316754028201103,
+        "first_eight_step_workflow_seconds": 139.75,
+        "second_eight_step_workflow_seconds": 136.47,
+        "image_psnr_db": 19.8550592547302,
+        "image_ssim": 0.824799478,
+        "image_mae_8bit": 10.884127298990885,
+        "settings_provenance": "Locally validated V1.1 setting; local V1.1 metadata had no official recommendation."
+      }
+    },
     "user_observation_20_step": {
       "status": "observational_non_controlled",
       "total_seconds": 533.94,
@@ -99,6 +154,19 @@
     "height": 512,
     "provenance": "Produced by the project's isolated reference and XDNA validation run; pixel data re-saved without PNG metadata."
   },
+  "turbo_image_conditions": {
+    "status": "measured",
+    "prompt": "a cheerful anime girl under cherry blossoms, detailed illustration, soft daylight",
+    "negative_prompt": "worst quality, low quality, blurry, jpeg artifacts",
+    "seed": 424242,
+    "sampler": "Euler",
+    "scheduler": "simple",
+    "steps": 8,
+    "cfg": 1.0,
+    "width": 512,
+    "height": 512,
+    "provenance": "Produced by the isolated Turbo V1.1 reference and XDNA validation run; pixel data re-saved without PNG metadata."
+  },
   "artifacts": [
     {
       "path": "docs/assets/comfyui-reference-2step.png",
@@ -113,6 +181,24 @@
       "path": "docs/assets/comfyui-xdna-2step.png",
       "bytes": 353879,
       "sha256": "f108b7631be8986507dc58398b9fc75583ffc0d554bfc50f06e56d8e08a63788",
+      "width": 512,
+      "height": 512,
+      "mode": "RGB",
+      "metadata_entries": 0
+    },
+    {
+      "path": "docs/assets/anima-turbo-v11-reference-8step.png",
+      "bytes": 365452,
+      "sha256": "4a61fedcc53db82f7e4aaa169237afa902081ccc747c8f5ec01a6a34cc10ef0d",
+      "width": 512,
+      "height": 512,
+      "mode": "RGB",
+      "metadata_entries": 0
+    },
+    {
+      "path": "docs/assets/anima-turbo-v11-xdna-8step.png",
+      "bytes": 366938,
+      "sha256": "5059e446c588ebacdf061177eb637b2d50580d237526d7be32fdde3ce13fd77f",
       "width": 512,
       "height": 512,
       "mode": "RGB",

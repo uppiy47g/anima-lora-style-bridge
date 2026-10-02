@@ -10,6 +10,13 @@ import torch
 from safetensors.torch import save_file
 
 from anima_xdna_poc.checkpoint import discover_linear_weight, select_weight_key
+from anima_xdna_poc.checkpoint_schema import (
+    NATIVE_NAMES,
+    canonical_keys,
+    detect_checkpoint_schema,
+    fingerprint_model_blocks,
+    validated_variant,
+)
 from anima_xdna_poc.errors import DependencyUnavailable, NPUUnavailable, UnsupportedTensor
 from anima_xdna_poc.linear import cpu_linear, deterministic_input, prepare_linear
 from anima_xdna_poc.block import (
@@ -87,7 +94,86 @@ def _save_blocks(path, config, count=1, fill=0.0):
     save_file(tensors, path)
 
 
+def _save_native_blocks(path, config, prefix, count=1, fill=0.0):
+    tensors = {}
+    for index in range(count):
+        tensors.update(
+            {
+                f"{prefix}blocks.{index}.{NATIVE_NAMES[name]}": tensor
+                for name, tensor in _block_tensors(config, fill + index).items()
+            }
+        )
+    save_file(tensors, path)
+
+
 class PackedWeightCacheTests(unittest.TestCase):
+    def test_model_fingerprint_normalizes_cpu_fp32_upcast(self):
+        class Model:
+            def __init__(self, dtype):
+                self.tensors = {
+                    key: torch.full((1,), 1.5, dtype=dtype)
+                    for key in canonical_keys()
+                }
+
+            def state_dict(self):
+                return self.tensors
+
+        bf16, _ = fingerprint_model_blocks(Model(torch.bfloat16))
+        fp32, _ = fingerprint_model_blocks(Model(torch.float32))
+        self.assertEqual(bf16, fp32)
+        self.assertEqual(
+            validated_variant(
+                "066b4281037504b1b7200ecd65b4182fc765ed882ecd5ca650db7308246a8dee"
+            ),
+            "Turbo V1.1",
+        )
+
+    def test_native_schemas_have_canonical_base_identity_and_separate_turbo(self):
+        config = _tiny_block_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            diffusers = root / "diffusers.safetensors"
+            native_base = root / "base.safetensors"
+            native_turbo = root / "turbo.safetensors"
+            _save_blocks(diffusers, config)
+            _save_native_blocks(native_base, config, "net.")
+            _save_native_blocks(
+                native_turbo, config, "model.diffusion_model.", fill=1.0
+            )
+            diff_identity, _ = fingerprint_source(diffusers, range(1))
+            base_identity, _ = fingerprint_source(native_base, range(1))
+            turbo_identity, _ = fingerprint_source(native_turbo, range(1))
+            cache = PackedWeightCache(
+                native_turbo, config, 0, 1, root / "cache"
+            )
+            status = cache.open()
+            manifest = cache.manifest
+            cache.close()
+        self.assertEqual(diff_identity["schema"], "diffusers-transformer")
+        self.assertEqual(base_identity["schema"], "native-net")
+        self.assertEqual(
+            turbo_identity["schema"], "native-model-diffusion-model"
+        )
+        self.assertEqual(
+            diff_identity["block_fingerprint"],
+            base_identity["block_fingerprint"],
+        )
+        self.assertNotEqual(
+            base_identity["block_fingerprint"],
+            turbo_identity["block_fingerprint"],
+        )
+        self.assertEqual(status.tensor_count, 20)
+        self.assertTrue(
+            all(
+                tensor["source_key"].startswith("model.diffusion_model.")
+                for tensor in manifest["descriptor"]["source_identity"]["tensors"]
+            )
+        )
+
+    def test_schema_resolver_rejects_incomplete_checkpoint(self):
+        with self.assertRaisesRegex(UnsupportedTensor, "matches=none"):
+            detect_checkpoint_schema(["blocks.0.self_attn.q_proj.weight"], range(1))
+
     def test_deterministic_key_and_future_namespace_fields(self):
         config = _tiny_block_config()
         with tempfile.TemporaryDirectory() as directory:

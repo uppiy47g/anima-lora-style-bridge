@@ -27,11 +27,16 @@ from .block_checkpoint import (
     LINEAR_SHAPES,
     NORM_SHAPES,
 )
+from .checkpoint_schema import (
+    canonical_block_fingerprint,
+    canonical_keys,
+    detect_checkpoint_schema,
+)
 from .errors import UnsupportedTensor
 from .linear import BLOCK_K, BLOCK_N, PreparedLinear, _aligned
 
 
-CACHE_ABI = 1
+CACHE_ABI = 2
 LAYOUT_VERSION = "aie2p-bf16-kn-256x256-k2048-v1"
 MODEL_FAMILY = "anima-cosmos-predict2"
 DEFAULT_CACHE_ROOT = Path.home() / ".cache" / "anima-xdna" / "weights"
@@ -116,12 +121,7 @@ def _read_header(path: Path) -> tuple[bytes, dict[str, Any], int]:
 
 
 def _expected_keys(blocks: range) -> list[str]:
-    names = tuple(LINEAR_SHAPES) + tuple(NORM_SHAPES)
-    return [
-        f"transformer_blocks.{block}.{name}"
-        for block in blocks
-        for name in names
-    ]
+    return canonical_keys(blocks)
 
 
 def _source_files(
@@ -177,12 +177,15 @@ def fingerprint_source(
     if weight_map is None:
         source_name = _source_name(checkpoint, source_files[0])
         weight_map = {key: source_name for key in headers[source_name][0]}
+    schema = detect_checkpoint_schema(weight_map.keys(), blocks)
+    canonical_to_source = schema.canonical_to_source
     missing = [
         key
         for key in keys
-        if key not in weight_map
-        or weight_map[key] not in headers
-        or key not in headers[weight_map[key]][0]
+        if canonical_to_source[key] not in weight_map
+        or weight_map[canonical_to_source[key]] not in headers
+        or canonical_to_source[key]
+        not in headers[weight_map[canonical_to_source[key]]][0]
     ]
     if missing:
         raise UnsupportedTensor(
@@ -191,12 +194,17 @@ def fingerprint_source(
     tensors = []
     for source_file in source_files:
         source_name = _source_name(checkpoint, source_file)
-        shard_keys = [key for key in keys if weight_map[key] == source_name]
+        shard_keys = [
+            key
+            for key in keys
+            if weight_map[canonical_to_source[key]] == source_name
+        ]
         header, data_start = headers[source_name]
         with source_file.open("rb") as handle:
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
                 for key in shard_keys:
-                    metadata = header[key]
+                    source_key = canonical_to_source[key]
+                    metadata = header[source_key]
                     begin, end = metadata["data_offsets"]
                     view = memoryview(mapped)[data_start + begin : data_start + end]
                     digest = hashlib.sha256(view).hexdigest()
@@ -217,6 +225,7 @@ def fingerprint_source(
                     tensors.append(
                         {
                             "key": key,
+                            "source_key": source_key,
                             "shard": source_name,
                             "dtype": metadata["dtype"],
                             "shape": metadata["shape"],
@@ -228,6 +237,7 @@ def fingerprint_source(
                         }
                     )
     identity = {
+        "schema": schema.name,
         "index": (
             {
                 "name": checkpoint.name,
@@ -242,6 +252,7 @@ def fingerprint_source(
         ],
         "tensors": sorted(tensors, key=lambda item: item["key"]),
     }
+    identity["block_fingerprint"] = canonical_block_fingerprint(tensors)
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     identity["fingerprint"] = hashlib.sha256(canonical).hexdigest()
     return identity, CacheTimings(
@@ -309,8 +320,10 @@ def _quick_validate_source(
             return False, (time.perf_counter() - started) * 1000
         with source_file.open("rb") as handle:
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
-                for tensor in tensors_by_shard.get(source_file.name, []):
-                    metadata = header.get(tensor["key"])
+                for tensor in tensors_by_shard.get(
+                    _source_name(checkpoint, source_file), []
+                ):
+                    metadata = header.get(tensor["source_key"])
                     if metadata is None:
                         return False, (time.perf_counter() - started) * 1000
                     begin, end = metadata["data_offsets"]
@@ -348,12 +361,11 @@ def _cache_descriptor(
 ) -> dict[str, Any]:
     mapping = [
         {
-            "block": block,
-            "source_key": f"transformer_blocks.{block}.{name}",
-            "logical_name": name,
+            "canonical_key": tensor["key"],
+            "source_key": tensor["source_key"],
+            "shard": tensor["shard"],
         }
-        for block in blocks
-        for name in tuple(LINEAR_SHAPES) + tuple(NORM_SHAPES)
+        for tensor in source["tensors"]
     ]
     return {
         "schema_version": CACHE_ABI,
@@ -707,14 +719,18 @@ class PackedWeightCache:
                         key: source_name
                         for key in sources[source_name].keys()
                     }
+                tensor_sources = {
+                    tensor["key"]: tensor
+                    for tensor in descriptor["source_identity"]["tensors"]
+                }
                 with (temporary / "weights.bin").open("wb") as payload:
                     for block in self.blocks:
                         prefix = f"transformer_blocks.{block}."
                         for name in LINEAR_SHAPES:
-                            source_key = prefix + name
-                            tensor = sources[weight_map[source_key]].get_tensor(
-                                source_key
-                            )
+                            canonical_key = prefix + name
+                            source = tensor_sources[canonical_key]
+                            source_key = source["source_key"]
+                            tensor = sources[source["shard"]].get_tensor(source_key)
                             out_name, in_name = LINEAR_SHAPES[name]
                             expected = (dimensions[out_name], dimensions[in_name])
                             if tuple(tensor.shape) != expected:
@@ -749,7 +765,8 @@ class PackedWeightCache:
                                 records.append(
                                     {
                                         "id": f"{block}:{name}:k{start}",
-                                        "source_key": prefix + name,
+                                        "canonical_key": canonical_key,
+                                        "source_key": source_key,
                                         "source_dtype": str(tensor.dtype).removeprefix("torch."),
                                         "source_shape": list(tensor.shape),
                                         "logical_shape": [end - start, tensor.shape[0]],
@@ -762,10 +779,12 @@ class PackedWeightCache:
                                 )
                                 offset += len(raw)
                         for name in NORM_SHAPES:
-                            source_key = prefix + name
-                            source_tensor = sources[
-                                weight_map[source_key]
-                            ].get_tensor(source_key)
+                            canonical_key = prefix + name
+                            source = tensor_sources[canonical_key]
+                            source_key = source["source_key"]
+                            source_tensor = sources[source["shard"]].get_tensor(
+                                source_key
+                            )
                             expected = (dimensions[NORM_SHAPES[name]],)
                             if tuple(source_tensor.shape) != expected:
                                 raise UnsupportedTensor(
@@ -791,7 +810,8 @@ class PackedWeightCache:
                             records.append(
                                 {
                                     "id": f"{block}:{name}",
-                                    "source_key": prefix + name,
+                                    "canonical_key": canonical_key,
+                                    "source_key": source_key,
                                     "source_dtype": str(source_tensor.dtype).removeprefix("torch."),
                                     "source_shape": list(source_tensor.shape),
                                     "logical_shape": list(tensor.shape),

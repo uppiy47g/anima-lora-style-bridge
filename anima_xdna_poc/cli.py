@@ -68,7 +68,7 @@ def linear_main(argv: list[str] | None = None) -> int:
         cache = None
         if args.weight_cache:
             import re
-            from .block_checkpoint import load_block_config
+            from .block_checkpoint import load_checkpoint_config
             from .weight_cache import PackedWeightCache
 
             match = re.fullmatch(
@@ -85,7 +85,7 @@ def linear_main(argv: list[str] | None = None) -> int:
             block_index = int(match.group(1))
             cache = PackedWeightCache(
                 args.checkpoint,
-                load_block_config(args.checkpoint.parent),
+                load_checkpoint_config(args.checkpoint),
                 0,
                 28,
                 args.cache_dir,
@@ -196,10 +196,9 @@ def block_main(argv: list[str] | None = None) -> int:
             run_cpu_block,
             run_xdna_block,
         )
-        from .block_checkpoint import load_block_config, load_block_weights
+        from .block_checkpoint import load_checkpoint_config, load_block_weights
 
-        config_path = args.config or args.checkpoint.parent / "config.json"
-        config = load_block_config(config_path)
+        config = load_checkpoint_config(args.checkpoint, args.config)
         weights = load_block_weights(args.checkpoint, config)
         packed_cache = None
         if args.weight_cache:
@@ -347,6 +346,17 @@ def chain_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--oracle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument(
+        "--max-block-nrms",
+        type=float,
+        default=5e-2,
+        help="maximum normalized RMS error at any intermediate block",
+    )
+    parser.add_argument(
+        "--max-final-nrms",
+        type=float,
+        help="separate final-block normalized RMS limit (defaults to max-block)",
+    )
+    parser.add_argument(
         "--weight-cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -357,6 +367,10 @@ def chain_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.warmups < 0 or args.runs <= 0:
         parser.error("--warmups must be non-negative and --runs must be positive")
+    if args.max_block_nrms <= 0 or (
+        args.max_final_nrms is not None and args.max_final_nrms <= 0
+    ):
+        parser.error("normalized RMS limits must be positive")
 
     try:
         from .block import BlockInputs, deterministic_block_inputs
@@ -399,6 +413,8 @@ def chain_main(argv: list[str] | None = None) -> int:
                     inputs,
                     args.start_block,
                     args.end_block,
+                    args.max_block_nrms,
+                    args.max_final_nrms,
                 )
                 populated = validation.xdna
             else:
@@ -453,6 +469,14 @@ def chain_main(argv: list[str] | None = None) -> int:
     )
     payload = {
         "status": "match" if validation is not None else "executed_without_oracle",
+        "numerical_gate": {
+            "max_block_normalized_rms": args.max_block_nrms,
+            "max_final_normalized_rms": (
+                args.max_block_nrms
+                if args.max_final_nrms is None
+                else args.max_final_nrms
+            ),
+        },
         "input": input_kind,
         "block_range": [args.start_block, args.end_block],
         "weight_cache": (
@@ -559,7 +583,7 @@ def cache_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--entry-key")
     args = parser.parse_args(argv)
 
-    from .block_checkpoint import load_block_config
+    from .block_checkpoint import load_checkpoint_config
     from .weight_cache import PackedWeightCache, list_entries, prune_entry
 
     if args.action == "list":
@@ -577,7 +601,7 @@ def cache_main(argv: list[str] | None = None) -> int:
     try:
         cache = PackedWeightCache(
             args.checkpoint,
-            load_block_config(args.config or args.checkpoint.parent),
+            load_checkpoint_config(args.checkpoint, args.config),
             args.start_block,
             args.end_block,
             args.cache_dir,
