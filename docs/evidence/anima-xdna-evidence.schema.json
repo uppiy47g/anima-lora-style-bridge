@@ -35,6 +35,40 @@
             "turbo_8_step_projection": {"$ref": "#/$defs/transferProjection"},
             "qkv_chaining": {"$ref": "#/$defs/qkvChainingMeasurement"}
           }
+        },
+        "cpu_model_memory": {
+          "type": "object",
+          "required": [
+            "status",
+            "methodology",
+            "source_checkpoint_bytes",
+            "stock_cpu_unet_dtype",
+            "bf16_loader_dtype",
+            "fp32_expected_block_parameter_bytes",
+            "bf16_measured_block_parameter_bytes",
+            "base_v1_0",
+            "turbo_v1_1",
+            "stock_fp32_memory_comparison",
+            "bf16_xrt_residency",
+            "xrt_bo_accounting",
+            "end_to_end_dtype_validation"
+          ],
+          "properties": {
+            "status": {"const": "measured_bf16_and_stock_fp32_loads"},
+            "methodology": {"type": "string", "minLength": 1},
+            "source_checkpoint_bytes": {"type": "integer", "minimum": 1},
+            "stock_cpu_unet_dtype": {"const": "float32"},
+            "bf16_loader_dtype": {"const": "bfloat16"},
+            "fp32_expected_block_parameter_bytes": {"type": "integer", "minimum": 1},
+            "bf16_measured_block_parameter_bytes": {"type": "integer", "minimum": 1},
+            "parameter_bytes_reduction_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+            "base_v1_0": {"$ref": "#/$defs/cpuModelMemoryRun"},
+            "turbo_v1_1": {"$ref": "#/$defs/cpuModelMemoryRun"},
+            "stock_fp32_memory_comparison": {"$ref": "#/$defs/stockFp32MemoryComparison"},
+            "bf16_xrt_residency": {"$ref": "#/$defs/bf16XrtResidency"},
+            "xrt_bo_accounting": {"type": "string", "minLength": 1},
+            "end_to_end_dtype_validation": {"enum": ["not_run", "passed", "failed"]}
+          }
         }
       }
     },
@@ -244,7 +278,150 @@
         "image_artifacts_distributed": {"type": "boolean"},
         "timing_note": {"type": "string", "minLength": 1}
       }
-    }
+    },
+    "cpuModelMemoryRun": {
+      "type": "object",
+      "required": [
+        "fingerprint",
+        "schema",
+        "load_seconds",
+        "block_parameter_count",
+        "block_parameter_bytes",
+        "block_unique_storage_bytes",
+        "nonblock_parameter_bytes",
+        "working_set_before",
+        "working_set_after_load",
+        "private_commit_before",
+        "private_commit_after_load",
+        "peak_working_set",
+        "peak_private_commit",
+        "page_fault_delta",
+        "modelpatcher_clone_shares_module",
+        "all_parameter_dtypes"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "schema": {"const": "comfyui-anima-module"},
+        "load_seconds": {"type": "number", "minimum": 0},
+        "block_parameter_count": {"const": 560},
+        "block_parameter_bytes": {"type": "integer", "minimum": 1},
+        "block_unique_storage_bytes": {"type": "integer", "minimum": 1},
+        "nonblock_parameter_bytes": {"type": "integer", "minimum": 0},
+        "working_set_before": {"type": "integer", "minimum": 0},
+        "working_set_after_load": {"type": "integer", "minimum": 0},
+        "private_commit_before": {"type": "integer", "minimum": 0},
+        "private_commit_after_load": {"type": "integer", "minimum": 0},
+        "stock_fp32_private_commit_after_load": {"type": "integer", "minimum": 0},
+        "private_commit_reduction_bytes": {"type": "integer", "minimum": 0},
+        "peak_private_commit_reduction_bytes": {"type": "integer", "minimum": 0},
+        "peak_working_set": {"type": "integer", "minimum": 0},
+        "peak_private_commit": {"type": "integer", "minimum": 0},
+        "page_fault_delta": {"type": "integer", "minimum": 0},
+        "modelpatcher_clone_shares_module": {"const": true},
+        "all_parameter_dtypes": {
+          "type": "array",
+          "items": {"const": "torch.bfloat16"},
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+      "stockFp32MemoryComparison": {
+        "type": "object",
+        "required": ["status", "methodology", "base_v1_0", "turbo_v1_1", "bf16_private_commit_reduction_fraction"],
+        "properties": {
+          "status": {"const": "measured_fresh_process_default_loader"},
+          "methodology": {"type": "string", "minLength": 1},
+          "base_v1_0": {"$ref": "#/$defs/stockFp32MemoryRun"},
+          "turbo_v1_1": {"$ref": "#/$defs/stockFp32MemoryRun"},
+          "bf16_private_commit_reduction_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+          "interpretation": {"type": "string", "minLength": 1}
+        }
+      },
+      "stockFp32MemoryRun": {
+        "type": "object",
+        "required": [
+          "load_seconds",
+          "block_parameter_bytes",
+          "nonblock_parameter_bytes",
+          "working_set_before",
+          "working_set_after_load",
+          "private_commit_before",
+          "private_commit_after_load",
+          "peak_working_set",
+          "peak_private_commit",
+          "page_fault_delta",
+          "block_dtype_numel"
+        ],
+        "properties": {
+          "load_seconds": {"type": "number", "minimum": 0},
+          "block_parameter_bytes": {"type": "integer", "minimum": 1},
+          "nonblock_parameter_bytes": {"type": "integer", "minimum": 0},
+          "working_set_before": {"type": "integer", "minimum": 0},
+          "working_set_after_load": {"type": "integer", "minimum": 0},
+          "private_commit_before": {"type": "integer", "minimum": 0},
+          "private_commit_after_load": {"type": "integer", "minimum": 0},
+          "peak_working_set": {"type": "integer", "minimum": 0},
+          "peak_private_commit": {"type": "integer", "minimum": 0},
+          "page_fault_delta": {"type": "integer", "minimum": 0},
+          "block_dtype_numel": {"type": "object", "required": ["float32"], "properties": {"float32": {"type": "integer", "minimum": 1}}}
+        }
+      },
+      "bf16XrtResidency": {
+        "type": "object",
+        "required": ["status", "actual_comfyui_nodes_lifecycle_verified", "methodology", "base_v1_0", "turbo_v1_1", "cleanup_note"],
+        "properties": {
+          "status": {"const": "measured_sharedruntime_fixture_runs"},
+          "actual_comfyui_nodes_lifecycle_verified": {"const": true},
+          "methodology": {"type": "string", "minLength": 1},
+          "base_v1_0": {"$ref": "#/$defs/bf16XrtResidencyRun"},
+          "turbo_v1_1": {"$ref": "#/$defs/bf16XrtResidencyRun"},
+          "cleanup_note": {"type": "string", "minLength": 1}
+        }
+      },
+      "bf16XrtResidencyRun": {
+        "type": "object",
+        "required": [
+          "cache_verify_seconds",
+          "first_chain_seconds",
+          "resident_chain_seconds",
+          "dispatches_per_chain",
+          "first_h2d_bytes",
+          "resident_h2d_bytes",
+          "d2h_host_visible_bytes_per_chain",
+          "weight_population_bytes_first",
+          "weight_population_bytes_resident",
+          "resident_hits",
+          "private_commit_after_cache_verify",
+          "private_commit_after_first_chain",
+          "private_commit_after_resident_chain",
+          "peak_private_commit",
+          "peak_working_set",
+          "private_commit_after_close_gc",
+          "working_set_after_close_gc",
+          "model_fingerprint"
+        ],
+        "properties": {
+          "cache_verify_seconds": {"type": "number", "minimum": 0},
+          "first_chain_seconds": {"type": "number", "minimum": 0},
+          "resident_chain_seconds": {"type": "number", "minimum": 0},
+          "dispatches_per_chain": {"const": 532},
+          "first_h2d_bytes": {"type": "integer", "minimum": 0},
+          "resident_h2d_bytes": {"type": "integer", "minimum": 0},
+          "d2h_host_visible_bytes_per_chain": {"type": "integer", "minimum": 0},
+          "weight_population_bytes_first": {"type": "integer", "minimum": 0},
+          "weight_population_bytes_resident": {"type": "integer", "minimum": 0},
+          "resident_hits": {"const": 644},
+          "private_commit_after_cache_verify": {"type": "integer", "minimum": 0},
+          "private_commit_after_first_chain": {"type": "integer", "minimum": 0},
+          "private_commit_after_resident_chain": {"type": "integer", "minimum": 0},
+          "peak_private_commit": {"type": "integer", "minimum": 0},
+          "peak_working_set": {"type": "integer", "minimum": 0},
+          "private_commit_after_close_gc": {"type": "integer", "minimum": 0},
+          "working_set_after_close_gc": {"type": "integer", "minimum": 0},
+          "model_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
   },
   "additionalProperties": true
 }

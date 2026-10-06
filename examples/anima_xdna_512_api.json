@@ -1,9 +1,8 @@
 {
   "1": {
-    "class_type": "UNETLoader",
+    "class_type": "LoadAnimaBF16",
     "inputs": {
-      "unet_name": "<NATIVE_ANIMA_BASE_OR_TURBO_FILENAME>",
-      "weight_dtype": "default"
+      "unet_name": "<NATIVE_ANIMA_BASE_OR_TURBO_FILENAME>"
     }
   },
   "2": {

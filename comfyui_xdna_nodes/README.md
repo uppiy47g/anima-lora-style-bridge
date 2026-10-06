@@ -26,7 +26,8 @@ back to CPU.
 
 - ComfyUI API validated at commit
   `170594057a22673349ddf0a3d88624b7fa5865bb`
-- native Base v1.0 or Turbo V1.1 BF16 checkpoint loaded by `UNETLoader`
+- native Base v1.0 or Turbo V1.1 BF16 checkpoint loaded by
+  **Load Anima (BF16)** (explicit ComfyUI `dtype=torch.bfloat16`)
 - matching read-only XDNA source: validated Diffusers/native Base for Base,
   or the same native Turbo checkpoint for Turbo
 - batch 1, latent `[1,16,1,64,64]`, 512x512 output
@@ -56,7 +57,11 @@ starting ComfyUI. The packed cache defaults to
 
 ## Nodes
 
-1. Load the native Anima Base or Turbo MODEL with ComfyUI's normal `UNETLoader`.
+1. Load the native Anima Base or Turbo MODEL with **Load Anima (BF16)**.
+   The normal `UNETLoader` does not expose BF16; on the validated CPU setup
+   its default Anima policy chooses FP32. The custom loader passes BF16 through
+   ComfyUI's supported `load_diffusion_model` options and refuses the result
+   if any transformer-block Parameter expanded to another dtype.
 2. Connect it to **Load/Attach Anima XDNA Model**.
 3. Set `checkpoint` to the matching source. For Base, use the validated Base
    Diffusers transformer or equivalent native Base checkpoint. For Turbo,
@@ -75,6 +80,18 @@ scale/mask/softmax, GELU, gates, and residual operations remain on CPU.
 
 `rebuild_cache` explicitly recreates the packed cache. `cache_dir` may point
 to another user-writable ASCII path. It must not point into the model folder.
+
+The attach status reports block Parameter logical/unique-storage bytes and
+dtype counts after source identity matches. It warns when CPU block Parameters
+are FP32. XRT BO population is reported separately. ModelPatcher clones share
+the underlying module, so attach never deletes or replaces block Parameters;
+LoRA/patch/state-dict behavior has no safe lazy-restore contract today.
+Fresh-process measurements on the validated host found stock FP32 loading
+used about 7.12 GB more process PrivateUsage than BF16 loading for either
+checkpoint (46.5%); see the evidence for working-set and peak counters. A
+separate BF16-plus-XRT fixture run verified matching Base/Turbo fingerprints
+and resident BO reuse. It did not validate sampler/image equivalence for the
+BF16 CPU pre/post-block arithmetic.
 
 ## Verified result
 
@@ -118,6 +135,10 @@ Base oracle limitation, not a passing Base chain gate.
 The first call additionally verifies the 3.96 GB packed cache and populates
 process-local XRT BOs, so cold and warm timings must not be compared as the
 same phase.
+
+Measured BF16 loader details, Windows process-memory methodology, the
+stock-FP32/BF16 memory pair, and the unrun end-to-end dtype-equivalence gate
+are recorded in the [reproducibility report](../docs/anima-xdna-reproducibility.md).
 
 If an applied LoRA/ModelPatcher patch, unsupported shape, incompatible
 ComfyUI API, cache corruption, XRT failure, or numerical/runtime error is

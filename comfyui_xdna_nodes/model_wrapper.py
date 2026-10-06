@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -15,6 +16,8 @@ import torch
 from anima_xdna_poc.block import BlockInputs, rotary_embedding
 from anima_xdna_poc.chain import AnimaXDNAChainRuntime
 from anima_xdna_poc.checkpoint_schema import (
+    canonical_keys,
+    detect_checkpoint_schema,
     fingerprint_model_blocks,
     validated_variant,
 )
@@ -58,6 +61,14 @@ class RuntimeDiagnostics:
     model_fingerprint: Optional[str] = None
     model_variant: Optional[str] = None
     qkv_chaining: bool = True
+    model_block_parameter_count: int = 0
+    model_block_parameter_dtypes: Optional[dict[str, int]] = None
+    model_block_parameter_bytes: int = 0
+    model_block_unique_storage_bytes: int = 0
+    model_nonblock_parameter_bytes: int = 0
+    model_fp32_block_memory_warning: Optional[str] = None
+    model_block_parameters_released: bool = False
+    model_block_memory_policy: str = "retain_shared_modelpatcher_parameters"
 
 
 class SharedRuntime:
@@ -113,6 +124,7 @@ class SharedRuntime:
                         f"{source_fingerprint[:16]}...). Select the matching "
                         "Base or Turbo checkpoint; no dispatch was attempted."
                     )
+                storage_profile = _model_storage_profile(diffusion_model)
             except BaseException:
                 runtime.close()
                 raise
@@ -128,6 +140,30 @@ class SharedRuntime:
             self.diagnostics.model_fingerprint = model_fingerprint
             self.diagnostics.model_variant = validated_variant(source_fingerprint)
             self.diagnostics.qkv_chaining = self.qkv_chaining
+            self.diagnostics.model_block_parameter_count = storage_profile[
+                "block_parameter_count"
+            ]
+            self.diagnostics.model_block_parameter_dtypes = storage_profile[
+                "block_dtype_numel"
+            ]
+            self.diagnostics.model_block_parameter_bytes = storage_profile[
+                "block_parameter_bytes"
+            ]
+            self.diagnostics.model_block_unique_storage_bytes = storage_profile[
+                "block_unique_storage_bytes"
+            ]
+            self.diagnostics.model_nonblock_parameter_bytes = storage_profile[
+                "nonblock_parameter_bytes"
+            ]
+            fp32_bytes = storage_profile["block_dtype_bytes"].get("float32", 0)
+            if fp32_bytes:
+                self.diagnostics.model_fp32_block_memory_warning = (
+                    f"The attached Anima blocks retain {fp32_bytes} bytes of "
+                    "FP32 parameters. Native Base/Turbo checkpoints are BF16; "
+                    "use the repository's Load Anima (BF16) node to avoid "
+                    "avoidable CPU weight expansion. We do not delete or "
+                    "replace shared ModelPatcher parameters."
+                )
             self.diagnostics.cache = (
                 {
                     **asdict(runtime.cache_status),
@@ -183,6 +219,10 @@ class SharedRuntime:
                     "replacement_boundary": (
                         "after ComfyUI patch/time/Qwen/RoPE preprocessing; "
                         "before final_layer/unpatchify"
+                    ),
+                    "npu_weight_storage_accounting": (
+                        "XRT BO population is reported separately and is not "
+                        "included in CPU Parameter storage byte counts."
                     ),
                 }
             )
@@ -468,6 +508,100 @@ def _validate_patcher(model):
         )
 
 
+def _model_storage_profile(diffusion_model) -> dict[str, Any]:
+    parameters = dict(diffusion_model.named_parameters())
+    schema = detect_checkpoint_schema(parameters.keys())
+    block_parameter_names = {
+        schema.canonical_to_source[key] for key in canonical_keys()
+    }
+    block_dtype_numel: Counter[str] = Counter()
+    block_dtype_bytes: Counter[str] = Counter()
+    block_parameter_count = 0
+    block_parameter_bytes = 0
+    nonblock_parameter_bytes = 0
+    storage_categories: dict[tuple[str, int, int], set[str]] = {}
+    storage_sizes: dict[tuple[str, int, int], int] = {}
+    for name, parameter in parameters.items():
+        category = "block" if name in block_parameter_names else "nonblock"
+        parameter_bytes = parameter.numel() * parameter.element_size()
+        if category == "block":
+            block_parameter_count += 1
+            block_parameter_bytes += parameter_bytes
+            block_dtype_numel[str(parameter.dtype).removeprefix("torch.")] += (
+                parameter.numel()
+            )
+            block_dtype_bytes[str(parameter.dtype).removeprefix("torch.")] += (
+                parameter_bytes
+            )
+        else:
+            nonblock_parameter_bytes += parameter_bytes
+        storage = parameter.untyped_storage()
+        storage_key = (
+            str(parameter.device),
+            storage.data_ptr(),
+            storage.nbytes(),
+        )
+        storage_categories.setdefault(storage_key, set()).add(category)
+        storage_sizes[storage_key] = storage.nbytes()
+    block_unique_storage_bytes = sum(
+        storage_sizes[key]
+        for key, categories in storage_categories.items()
+        if categories == {"block"}
+    )
+    return {
+        "block_parameter_count": block_parameter_count,
+        "block_dtype_numel": dict(block_dtype_numel),
+        "block_dtype_bytes": dict(block_dtype_bytes),
+        "block_parameter_bytes": block_parameter_bytes,
+        "block_unique_storage_bytes": block_unique_storage_bytes,
+        "nonblock_parameter_bytes": nonblock_parameter_bytes,
+    }
+
+
+class LoadAnimaBF16:
+    @classmethod
+    def INPUT_TYPES(cls):
+        import folder_paths
+
+        return {
+            "required": {
+                "unet_name": (
+                    folder_paths.get_filename_list("diffusion_models"),
+                )
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load"
+    CATEGORY = "Anima XDNA 2"
+
+    def load(self, unet_name):
+        import comfy.sd
+        import folder_paths
+
+        path = folder_paths.get_full_path_or_raise(
+            "diffusion_models", unet_name
+        )
+        model = comfy.sd.load_diffusion_model(
+            path,
+            model_options={"dtype": torch.bfloat16},
+        )
+        diffusion_model = model.model.diffusion_model
+        if type(diffusion_model).__name__ != "Anima":
+            raise RuntimeError(
+                "Load Anima (BF16) requires a native ComfyUI Anima checkpoint"
+            )
+        profile = _model_storage_profile(diffusion_model)
+        if profile["block_dtype_bytes"].get("bfloat16", 0) != profile[
+            "block_parameter_bytes"
+        ]:
+            raise RuntimeError(
+                "ComfyUI did not retain all Anima transformer-block Parameters "
+                "as BF16; refusing to load a memory-expanded MODEL."
+            )
+        return (model,)
+
+
 class LoadAttachAnimaXDNAModel:
     @classmethod
     def INPUT_TYPES(cls):
@@ -581,12 +715,14 @@ class AnimaXDNAUnload:
 
 
 NODE_CLASS_MAPPINGS = {
+    "LoadAnimaBF16": LoadAnimaBF16,
     "LoadAttachAnimaXDNAModel": LoadAttachAnimaXDNAModel,
     "AnimaXDNARuntimeStatus": AnimaXDNARuntimeStatus,
     "AnimaXDNAUnload": AnimaXDNAUnload,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadAnimaBF16": "Load Anima (BF16)",
     "LoadAttachAnimaXDNAModel": "Load/Attach Anima XDNA Model",
     "AnimaXDNARuntimeStatus": "Anima XDNA Runtime Status",
     "AnimaXDNAUnload": "Unload Anima XDNA Runtime",

@@ -114,7 +114,8 @@ additional arguments. The XDNA runtime remains available through
 
 ## ComfyUI wiring
 
-Load the native Base or Turbo MODEL with `UNETLoader`, then insert
+Use `Anima XDNA 2 / Load Anima (BF16)` to load the native Base or Turbo model,
+then insert
 `Anima XDNA 2 / Load/Attach Anima XDNA Model` between its MODEL output and the
 normal sampler MODEL input. Set `checkpoint` to the matching Base source or
 the same native Turbo checkpoint. Leave `rebuild_cache=false`; leave `cache_dir` empty for
@@ -122,6 +123,85 @@ the same native Turbo checkpoint. Leave `rebuild_cache=false`; leave `cache_dir`
 directory. Connect the wrapped MODEL to `Anima XDNA Runtime Status` when
 collecting evidence. `Unload Anima XDNA Runtime` releases the attachment
 before a model switch.
+
+The stock `UNETLoader` control does not offer BF16. On the validated
+CPU-only ComfyUI setup, its default Anima dtype policy selects FP32 (the
+Anima config supports BF16, FP16, and FP32; `should_use_bf16(cpu)` is false).
+That expands the 3,875,565,568-byte 560-block BF16 source payload to
+7,751,131,136 bytes of FP32 block Parameters. `Load Anima (BF16)` calls
+ComfyUI's public `load_diffusion_model` API with an explicit
+`model_options={"dtype": torch.bfloat16}` and refuses the result unless every
+transformer-block Parameter remains BF16. The other 125 non-block parameters
+are loaded through the same ComfyUI model path and remain subject to the
+checkpoint/model configuration.
+
+The XDNA attach status reports logical CPU block Parameter bytes, unique
+underlying block storage bytes, dtype/numel breakdown, and non-block Parameter
+bytes after model/checkpoint fingerprint equality is verified. It also warns
+if the attached block Parameters are FP32. XRT BO population is reported
+separately; it is not added to CPU Parameter bytes. We intentionally retain
+all block Parameters: `ModelPatcher.clone()` shares the underlying model
+module, and the current wrapper does not own a reversible lazy-restore,
+LoRA/patch, state-dict, or reload lifecycle for deleting them safely. The
+BF16 loader is therefore the supported memory reduction; attach does not
+mutate or release shared model weights.
+
+The explicit BF16 option changes CPU pre/post-block computation dtype compared
+with CPU-default FP32. The native checkpoint values are BF16 in both Base and
+Turbo, but end-to-end latent/image equivalence must be checked for a workflow
+before treating a dtype change as bitwise-neutral. The XDNA block weights,
+canonical fingerprint, QKV dispatch path, and output conversion remain
+unchanged. The status data records measured Parameter storage; transient
+loader peak commit/working set and system-wide unified-memory pressure are
+separate quantities and must not be inferred from the Parameter count alone.
+
+On the validated CPU setup, fresh standalone ComfyUI processes loaded both
+native checkpoints through the same public `comfy.sd.load_diffusion_model`
+API: with explicit BF16 options and with stock default options. The default
+path selected FP32. Both BF16 models matched their canonical fingerprints and
+retained 3,875,565,568 unique bytes across 560 transformer-block Parameters;
+the 125 non-block Parameters totaled 306,572,288 bytes. The corresponding
+FP32 block storage was measured at 7,751,131,136 bytes (twice the BF16
+allocation).
+
+Windows `GetProcessMemoryInfo` measured process `PrivateUsage` commit after
+load at 8,193,351,680 bytes (Base BF16) and 8,192,634,880 bytes (Turbo BF16),
+versus 15,317,835,776 and 15,318,614,016 bytes with the stock FP32 loader.
+That is a measured 7,124,484,096-byte Base reduction and 7,125,979,136-byte
+Turbo reduction, about 46.5% of the stock-FP32 process commit. Peak private
+commit was lower by about 7.13 GB in each paired fresh-process measurement.
+Peak working set was 8.80 GB with BF16 versus 11.34 GB (Base) / 11.49 GB
+(Turbo) with FP32. These are process-level before/after/peak counters, not a
+claim that the BF16 parameter delta is all private resident RAM; page-fault
+counts and working set are recorded separately. Full per-run values and
+methodology are in the machine-readable evidence.
+
+The actual `Load Anima (BF16)` and `Load/Attach Anima XDNA Model` nodes were
+also invoked for Base and Turbo: both reported the expected model fingerprint
+and block-byte count, their ModelPatcher clones shared the underlying module,
+and unload closed the attachment. The XDNA coexistence path was additionally
+exercised for both variants using the BF16-loaded native ComfyUI module:
+`SharedRuntime` verified the packed cache
+and complete model fingerprint, opened XRT, ran the real 28-block capture
+twice, then closed and garbage-collected the runtime/model. Each first chain
+populated 3,963,617,280 weight-BO bytes; each resident chain populated zero
+additional weight bytes and reported 644 resident hits / 532 dispatches.
+Measured first/resident chain times were 20.69/10.18 s for Base and
+22.35/10.54 s for Turbo. This confirms cache identity and XRT residency while
+the BF16 model is loaded, but it is not a sampler or image-quality run. During
+these XRT runs, peak process private commit reached about 16.57 GB; after
+`close()` and GC it remained 9.22 GB (Base) / 8.25 GB (Turbo), although the
+working sets fell to about 0.74 GB. Python/runtime allocator behavior did not
+return all commit before process exit. XRT BO byte counts and CPU Parameter
+bytes remain separately reported because unified-memory allocations must not
+be double-counted.
+
+This establishes a material CPU-model memory reduction without deleting or
+replacing shared ModelPatcher Parameters. It does **not** establish BF16
+sampler latent/image equivalence: CPU preprocessing and final-layer arithmetic
+can differ from the prior FP32 workflow. The BF16 Turbo 8-step Euler/simple/
+CFG-1 seed-424242 ComfyUI pair remains unrun, so the previous 139.18 s /
+pixel-identical QKV-chaining result is not claimed for this loader change.
 
 The API JSON in [`../examples/anima_xdna_512_api.json`](../examples/anima_xdna_512_api.json)
 is a minimal insertion/status fragment, not a redistributable model workflow.

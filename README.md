@@ -17,6 +17,12 @@ projection, and VAE remain on the CPU. Incidental display-GPU activity is not
 model acceleration. Task Manager's NPU percentage is also not a direct AIE
 utilization counter.
 
+The `Load Anima (BF16)` node retains native checkpoint precision instead of
+ComfyUI's stock CPU FP32 expansion. Fresh-process measurements for both Base
+and Turbo showed about 7.12 GB lower process PrivateUsage after model load
+(46.5%); the normal ModelPatcher-shared Parameters are retained, not deleted.
+The BF16 loader's sampler/image quality equivalence has not yet been measured.
+
 The 2026-10-06 optimization chains each self/cross-attention Q/K/V projection
 group into one XRT dispatch and reuses session-owned output buffers. On the
 28-block chain this reduces dispatches from 644 to 532 and H2D bytes by
@@ -92,9 +98,9 @@ python -m pip install .
 ### XDNA 2 MODELラッパー
 
 Windows XDNA 2環境では、同梱の
-`Load/Attach Anima XDNA Model`ノードに通常のAnima Base v1.0または
-Turbo V1.1 MODELを
-接続すると、28 Transformer blockだけをresident Triton-XDNA/XRT runtimeへ
+`Load Anima (BF16)`ノードでnative Anima Base v1.0またはTurbo V1.1を
+明示的にBF16でloadして`Load/Attach Anima XDNA Model`へ接続すると、
+28 Transformer blockだけをresident Triton-XDNA/XRT runtimeへ
 置換できます。ONNX/Vitis AI EPは使用せず、元MODELをcloneするため破壊しません。
 Baseは対応するBase source、Turboは同じnative Turbo checkpointを指定します。
 560個のblock tensorを完全digestしてMODEL/source不一致をdispatch前に拒否します。
