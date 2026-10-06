@@ -57,6 +57,7 @@ class RuntimeDiagnostics:
     model_schema: Optional[str] = None
     model_fingerprint: Optional[str] = None
     model_variant: Optional[str] = None
+    qkv_chaining: bool = True
 
 
 class SharedRuntime:
@@ -69,10 +70,12 @@ class SharedRuntime:
         checkpoint: Path,
         cache_dir: Optional[Path] = None,
         rebuild_cache: bool = False,
+        qkv_chaining: bool = True,
     ):
         self.checkpoint = Path(checkpoint)
         self.cache_dir = cache_dir
         self.rebuild_cache = rebuild_cache
+        self.qkv_chaining = qkv_chaining
         self._runtime: Optional[AnimaXDNAChainRuntime] = None
         self._refs = 1
         self._lock = threading.RLock()
@@ -89,6 +92,7 @@ class SharedRuntime:
                 weight_cache=True,
                 cache_dir=self.cache_dir,
                 rebuild_cache=self.rebuild_cache,
+                qkv_chaining=self.qkv_chaining,
             )
             try:
                 runtime.prepare_weight_cache()
@@ -123,6 +127,7 @@ class SharedRuntime:
             self.diagnostics.model_schema = model_schema
             self.diagnostics.model_fingerprint = model_fingerprint
             self.diagnostics.model_variant = validated_variant(source_fingerprint)
+            self.diagnostics.qkv_chaining = self.qkv_chaining
             self.diagnostics.cache = (
                 {
                     **asdict(runtime.cache_status),
@@ -477,6 +482,7 @@ class LoadAttachAnimaXDNAModel:
             },
             "optional": {
                 "cache_dir": ("STRING", {"default": ""}),
+                "qkv_chaining": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -489,7 +495,9 @@ class LoadAttachAnimaXDNAModel:
     def IS_CHANGED(cls, **_kwargs):
         return time.time_ns()
 
-    def attach(self, model, checkpoint, rebuild_cache, cache_dir=""):
+    def attach(
+        self, model, checkpoint, rebuild_cache, cache_dir="", qkv_chaining=True
+    ):
         _validate_patcher(model)
         path = Path(checkpoint)
         if not path.is_file():
@@ -499,6 +507,7 @@ class LoadAttachAnimaXDNAModel:
             path,
             Path(cache_dir) if cache_dir.strip() else None,
             rebuild_cache,
+            qkv_chaining,
         )
         try:
             runtime.prepare(model.model.diffusion_model)

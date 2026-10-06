@@ -18,6 +18,10 @@ LinearRunner = Callable[
     [str, torch.Tensor, torch.Tensor, Optional[str]], torch.Tensor
 ]
 BatchedRunner = Callable[[str, torch.Tensor, torch.Tensor], torch.Tensor]
+QKVRunner = Callable[
+    [str, torch.Tensor, torch.Tensor, tuple[str, str, str], tuple[torch.Tensor, ...]],
+    dict[str, Any],
+]
 
 
 @dataclass(frozen=True)
@@ -163,12 +167,14 @@ class _BlockExecution:
         runner: LinearRunner,
         runner_device: str,
         batched_runner: Optional[BatchedRunner] = None,
+        qkv_runner: Optional[QKVRunner] = None,
     ):
         self.config = config
         self.weights = weights
         self.runner = runner
         self.runner_device = runner_device
         self.batched_runner = batched_runner
+        self.qkv_runner = qkv_runner
         self.metrics: list[StageMetric] = []
 
     def host(self, name: str, operation: Callable[[], Any]) -> Any:
@@ -226,6 +232,65 @@ class _BlockExecution:
         )
         return result
 
+    def qkv(
+        self,
+        prefix: str,
+        hidden: torch.Tensor,
+        context: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        names = (
+            prefix + ".to_q.weight",
+            prefix + ".to_k.weight",
+            prefix + ".to_v.weight",
+        )
+        if self.qkv_runner is None:
+            return (
+                self.linear(prefix + ".q", hidden, names[0]),
+                self.linear(prefix + ".k", context, names[1]),
+                self.linear(prefix + ".v", context, names[2]),
+            )
+        weights = tuple(self.weights[name] for name in names)
+        started = time.perf_counter()
+        try:
+            profile = self.qkv_runner(
+                prefix, hidden, context, names, weights
+            )
+        except PrototypeError as error:
+            raise type(error)(f"{prefix}.qkv_chain: {error}") from error
+        elapsed = (time.perf_counter() - started) * 1000
+        rows = (
+            hidden.numel() // hidden.shape[-1],
+            context.numel() // context.shape[-1],
+            context.numel() // context.shape[-1],
+        )
+        flops = sum(
+            2 * row_count * weight.shape[0] * weight.shape[1]
+            for row_count, weight in zip(rows, weights)
+        )
+        transfer = sum(
+            weight.numel() * 2 for weight in weights
+        )
+        transfer += hidden.numel() * 2
+        if hidden is not context:
+            transfer += context.numel() * 2
+        transfer += sum(output.numel() * 2 for output in profile["outputs"])
+        self.metrics.append(
+            StageMetric(
+                prefix + ".qkv_chain",
+                self.runner_device,
+                elapsed,
+                profile["dispatches"],
+                flops,
+                transfer,
+                profile["h2d_bytes"],
+                profile["d2h_bytes"],
+                profile["allocation_count"],
+                profile["resident_hits"],
+                weight_population_bytes=profile["weight_population_bytes"],
+            )
+        )
+        return profile["outputs"]
+
     def adaln(
         self,
         prefix: str,
@@ -267,9 +332,7 @@ class _BlockExecution:
         mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         cfg = self.config
-        query = self.linear(prefix + ".q", hidden, prefix + ".to_q.weight")
-        key = self.linear(prefix + ".k", context, prefix + ".to_k.weight")
-        value = self.linear(prefix + ".v", context, prefix + ".to_v.weight")
+        query, key, value = self.qkv(prefix, hidden, context)
         query, key, value = self.host(
             prefix + ".qkv_layout",
             lambda: tuple(
@@ -467,6 +530,7 @@ def run_xdna_block(
     batched_attention: bool = True,
     packed_cache=None,
     block_index: Optional[int] = None,
+    qkv_chaining: bool = True,
 ) -> BlockResult:
     _validate_inputs(config, inputs)
     from .xdna import XDNASession
@@ -586,12 +650,60 @@ def run_xdna_block(
             batched_runner.last_resident_hits = int(dispatched.resident_hit)
             return dispatched.output_bf16
 
+        def qkv_runner(
+            prefix: str,
+            hidden: torch.Tensor,
+            context: torch.Tensor,
+            weight_names: tuple[str, str, str],
+            projection_weights: tuple[torch.Tensor, ...],
+        ) -> dict[str, Any]:
+            if resident_key is None or not hasattr(
+                active_session, "dispatch_qkv_chain"
+            ):
+                raise UnsupportedTensor(
+                    "resident Q/K/V chaining requires a fingerprint-scoped XDNA session"
+                )
+            sources = (hidden, context, context)
+            prepared = []
+            for source, weight, weight_name in zip(
+                sources, projection_weights, weight_names
+            ):
+                flattened = source.reshape(-1, source.shape[-1])
+                if flattened.shape[1] > 2048:
+                    raise UnsupportedTensor(
+                        "resident Q/K/V chaining supports input widths up to 2048"
+                    )
+                if (
+                    packed_cache is not None
+                    and block_index is not None
+                ):
+                    item = packed_cache.prepared(
+                        block_index,
+                        weight_name,
+                        0,
+                        flattened,
+                        weight.shape[0],
+                    )
+                else:
+                    item = prepare_linear(flattened, weight)
+                prepared.append(item)
+            result = active_session.dispatch_qkv_chain(
+                tuple(prepared),
+                f"{packed_cache.manifest['cache_key'] if packed_cache is not None else resident_key}:"
+                f"{resident_key}:{prefix}:qkv",
+                shared_input=hidden is context,
+            )
+            return result
+
         result = _BlockExecution(
             config,
             weights,
             runner,
             "xdna2",
             batched_runner if batched_attention else None,
+            qkv_runner
+            if resident_key is not None and qkv_chaining
+            else None,
         ).run(inputs)
     return BlockResult(
         result.output,

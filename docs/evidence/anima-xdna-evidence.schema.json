@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/uppiy47g/anima-lora-style-bridge/docs/evidence/anima-xdna-evidence.schema.json",
-  "title": "Anima XDNA validation evidence",
+  "title": "Anima XDNA optimization evidence",
   "type": "object",
   "required": ["schema_version", "source_commits", "tested_system", "boundary", "measurements", "artifacts"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "source_commits": {"type": "object"},
     "tested_system": {"type": "object"},
     "boundary": {"type": "object"},
@@ -24,6 +24,7 @@
             "comparison_with_historical_accounting",
             "attention_scale_fusion_trial",
             "turbo_end_to_end",
+            "qkv_chaining",
             "synthetic_base_chain_followup"
           ],
           "properties": {
@@ -31,7 +32,8 @@
             "base_v1_0": {"$ref": "#/$defs/residentBlockProfile"},
             "turbo_v1_1": {"$ref": "#/$defs/residentBlockProfile"},
             "chain_28_projection": {"$ref": "#/$defs/transferProjection"},
-            "turbo_8_step_projection": {"$ref": "#/$defs/transferProjection"}
+            "turbo_8_step_projection": {"$ref": "#/$defs/transferProjection"},
+            "qkv_chaining": {"$ref": "#/$defs/qkvChainingMeasurement"}
           }
         }
       }
@@ -90,6 +92,157 @@
         "dispatches": {"type": "integer", "minimum": 1},
         "h2d_bytes": {"type": "integer", "minimum": 0},
         "d2h_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "qkvChainingMeasurement": {
+      "type": "object",
+      "required": [
+        "status",
+        "host_operations_moved",
+        "block_to_block_activation_residency",
+        "per_block",
+        "chain_28",
+        "eight_step_transfer_projection",
+        "base_v1_0_real_fixture",
+        "turbo_v1_1_real_fixture",
+        "turbo_v1_1_comfyui"
+      ],
+      "properties": {
+        "status": {"const": "measured"},
+        "host_operations_moved": {"const": false},
+        "block_to_block_activation_residency": {"const": false},
+        "per_block": {"$ref": "#/$defs/qkvTransferPair"},
+        "chain_28": {"$ref": "#/$defs/qkvChain28"},
+        "eight_step_transfer_projection": {"$ref": "#/$defs/qkvEightStepProjection"},
+        "base_v1_0_real_fixture": {"$ref": "#/$defs/qkvFixtureOutcome"},
+        "turbo_v1_1_real_fixture": {"$ref": "#/$defs/qkvFixtureOutcome"},
+        "turbo_v1_1_comfyui": {"$ref": "#/$defs/qkvComfyWorkflow"}
+      }
+    },
+    "qkvTransferPair": {
+      "type": "object",
+      "required": [
+        "dispatches_before",
+        "dispatches_after",
+        "h2d_bytes_before",
+        "h2d_bytes_after",
+        "d2h_visible_bytes_before",
+        "d2h_visible_bytes_after"
+      ],
+      "properties": {
+        "dispatches_before": {"type": "integer", "minimum": 1},
+        "dispatches_after": {"type": "integer", "minimum": 1},
+        "h2d_bytes_before": {"type": "integer", "minimum": 0},
+        "h2d_bytes_after": {"type": "integer", "minimum": 0},
+        "d2h_visible_bytes_before": {"type": "integer", "minimum": 0},
+        "d2h_visible_bytes_after": {"type": "integer", "minimum": 0}
+      }
+    },
+    "qkvChain28": {
+      "type": "object",
+      "required": [
+        "dispatches_before",
+        "dispatches_after",
+        "h2d_bytes_before",
+        "h2d_bytes_after",
+        "h2d_bytes_saved",
+        "d2h_visible_bytes_before",
+        "d2h_visible_bytes_after",
+        "reported_bo_allocation_events_before",
+        "reported_bo_allocation_events_after",
+        "base_v1_0",
+        "turbo_v1_1"
+      ],
+      "properties": {
+        "dispatches_before": {"type": "integer", "minimum": 1},
+        "dispatches_after": {"type": "integer", "minimum": 1},
+        "h2d_bytes_before": {"type": "integer", "minimum": 0},
+        "h2d_bytes_after": {"type": "integer", "minimum": 0},
+        "h2d_bytes_saved": {"type": "integer", "minimum": 0},
+        "d2h_visible_bytes_before": {"type": "integer", "minimum": 0},
+        "d2h_visible_bytes_after": {"type": "integer", "minimum": 0},
+        "reported_bo_allocation_events_before": {"type": "integer", "minimum": 0},
+        "reported_bo_allocation_events_after": {"type": "integer", "minimum": 0},
+        "base_v1_0": {"$ref": "#/$defs/chainWallMeasurement"},
+        "turbo_v1_1": {"$ref": "#/$defs/chainWallMeasurement"}
+      }
+    },
+    "chainWallMeasurement": {
+      "type": "object",
+      "required": ["separate_xdna_wall_seconds", "chained_xdna_wall_seconds", "timing_note"],
+      "properties": {
+        "separate_xdna_wall_seconds": {"type": "number", "minimum": 0},
+        "chained_xdna_wall_seconds": {"type": "number", "minimum": 0},
+        "timing_note": {"type": "string", "minLength": 1}
+      }
+    },
+    "qkvEightStepProjection": {
+      "type": "object",
+      "required": [
+        "status",
+        "dispatches_before",
+        "dispatches_after",
+        "h2d_bytes_before",
+        "h2d_bytes_after",
+        "d2h_visible_bytes_before",
+        "d2h_visible_bytes_after"
+      ],
+      "properties": {
+        "status": {"const": "derived_from_measured_28_block_chain"},
+        "dispatches_before": {"type": "integer", "minimum": 1},
+        "dispatches_after": {"type": "integer", "minimum": 1},
+        "h2d_bytes_before": {"type": "integer", "minimum": 0},
+        "h2d_bytes_after": {"type": "integer", "minimum": 0},
+        "d2h_visible_bytes_before": {"type": "integer", "minimum": 0},
+        "d2h_visible_bytes_after": {"type": "integer", "minimum": 0}
+      }
+    },
+    "qkvFixtureOutcome": {
+      "type": "object",
+      "required": [
+        "intermediate_gate",
+        "final_gate",
+        "worst_block",
+        "worst_cpu_oracle_nrms",
+        "final_cpu_oracle_nrms",
+        "gate_status",
+        "old_new_xdna_block_outputs_bitwise_equal"
+      ],
+      "properties": {
+        "intermediate_gate": {"type": "number", "exclusiveMinimum": 0},
+        "final_gate": {"type": "number", "exclusiveMinimum": 0},
+        "worst_block": {"type": "integer", "minimum": 0},
+        "worst_cpu_oracle_nrms": {"type": "number", "minimum": 0},
+        "final_cpu_oracle_nrms": {"type": "number", "minimum": 0},
+        "gate_status": {"enum": ["passed", "failed_in_both_paths"]},
+        "old_new_xdna_block_outputs_bitwise_equal": {"type": "boolean"}
+      }
+    },
+    "qkvComfyWorkflow": {
+      "type": "object",
+      "required": [
+        "status",
+        "settings",
+        "qkv_chaining_disabled_execution_seconds",
+        "qkv_chaining_enabled_execution_seconds",
+        "improvement_seconds",
+        "improvement_percent",
+        "image_pixel_equal",
+        "image_mae_8bit",
+        "image_artifacts_distributed",
+        "timing_note"
+      ],
+      "properties": {
+        "status": {"const": "measured_controlled_warm_pair"},
+        "settings": {"type": "object"},
+        "qkv_chaining_disabled_execution_seconds": {"type": "number", "minimum": 0},
+        "qkv_chaining_enabled_execution_seconds": {"type": "number", "minimum": 0},
+        "improvement_seconds": {"type": "number"},
+        "improvement_percent": {"type": "number"},
+        "image_pixel_equal": {"type": "boolean"},
+        "image_mae_8bit": {"type": "number", "minimum": 0},
+        "image_artifacts_distributed": {"type": "boolean"},
+        "timing_note": {"type": "string", "minLength": 1}
       }
     }
   },

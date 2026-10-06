@@ -35,16 +35,21 @@ exact source key. LoRA adapters and quantized checkpoints remain unsupported.
 ## NPU, attention fusion, and residency
 
 Every block Linear and every QK-transpose/attention-value GEMM runs on XDNA 2.
-The optimized path uses **23 XRT dispatches per block**:
+The current optimized path uses **19 XRT dispatches per block**:
 
-- 19 Linear dispatches (the 16 logical model Linear operations, with the
-  8192-wide MLP output reduction split into four FP32 partials);
+- 15 standalone Linear dispatches (the 16 logical model Linear operations,
+  with the 8192-wide MLP output reduction split into four FP32 partials,
+  minus the six Q/K/V projections grouped below);
+- two Q/K/V dispatches, each an `NPUChain` containing three BF16 Linear
+  launches for one attention module;
 - four attention dispatches: self QK, self AV, cross QK, and cross AV.
 
 Each attention dispatch uses Triton-XDNA's official `NPUChain` multi-launch API
 to stitch the 16 correct head-specific Triton kernels into one ELF/XRT run.
-This removes the head-count-proportional host dispatches without changing
-head semantics. A single 3D Triton grid was tested and rejected because the
+Q/K/V chaining removes four more XRT launches per block by sharing the self
+attention input and staging cross query/context once each. Set the ComfyUI
+`qkv_chaining` input to `false` to run the 23-dispatch comparison path. A
+single 3D Triton grid was tested and rejected because the
 installed AIE2P lowering corrupted heads at realistic multi-tile shapes;
 folding heads into the program M dimension was also rejected by AIR tile-size
 inference. Neither unsafe path is used by the package.
@@ -52,16 +57,19 @@ inference. Neither unsafe path is used by the package.
 The resident session owns the XRT device, ELF objects, hardware contexts,
 kernels, and mapped `ext.bo` buffers. Static weight BOs are populated once and
 reused across blocks/runs; dynamic input and output BOs are reused by shape.
-Outputs remain mapped rather than being copied to a separate host tensor, so
-the steady path has zero *additional staging-buffer* D2H copies. Each output
-BO is still synchronized for host access; the profiler now counts those
-device-to-host-visible bytes instead of reporting zero. Cache synchronization
-time is reported separately for ordinary Linear dispatches; the head-chain
-API combines its launch and output synchronization time. After population,
-checkpoint tensors are replaced by shape/dtype metadata (except the small Q/K
-RMSNorm vectors), avoiding a second approximately 4 GB host copy while the
-resident BOs are live. The safetensors checkpoint always remains the source
-of truth.
+The Q/K/V chains own three `shared.empty` output buffers per signature and
+bind them through Triton-XDNA's public `bound_buffers` interface; these
+session-lifetime buffers are closed on normal exit or error. Outputs are
+copied to BF16 CPU tensors because subsequent normalization/attention stages
+are still host-side. This reuses output allocation, not block-to-block
+activation values, and does not eliminate output synchronization. The profiler
+counts device-to-host-visible bytes; no separate D2H staging tensor is
+implied. Cache synchronization time is reported separately for ordinary
+Linear dispatches; the head-chain API combines launch and output
+synchronization time. After population, checkpoint tensors are replaced by
+shape/dtype metadata (except the small Q/K RMSNorm vectors), avoiding a second
+approximately 4 GB host copy while the resident BOs are live. The safetensors
+checkpoint always remains the source of truth.
 
 SiLU, LayerNorm/AdaLN modulation, Q/K RMSNorm, RoPE, scale/mask/softmax, exact
 GELU, tensor reshapes, gates, and residual additions remain explicit PyTorch
@@ -71,11 +79,10 @@ are reported; there is no silent CPU fallback. Parameterized GEMMs account for
 
 The supported 512x512 path is batch 1, 1024 image tokens, hidden size 2048,
 512 context tokens, and context width 1024. The deterministic default input is
-synthetic. Hardware chain validation used exact Anima model patch embedding,
-timestep embedding, `temb`, and Cosmos RoPE captured read-only before block 0,
-but with a random latent and synthetic text context. It is therefore
-model-produced preprocessing, not a capture from a real prompt-generation
-run.
+synthetic. The current Base and Turbo hardware chain fixtures were captured
+read-only before block 0 during standalone ComfyUI prompt generation with the
+Qwen encoder, model patch/time embeddings, and Cosmos RoPE; fixture files are
+local-only and are not distributed.
 
 ## Windows prerequisites
 
@@ -184,7 +191,7 @@ The first build of all four stitched 16-head artifacts took approximately
 artifacts for every block and later process. This compile cost is never
 reported as steady execution.
 
-The full 28-block resident chain measured:
+The earlier pre-Q/K/V 23-dispatch full-chain profile measured:
 
 - 644 dispatches (`23 x 28`);
 - cached steady wall times of 7.02, 7.03, and 7.15 s;
@@ -198,12 +205,12 @@ The full 28-block resident chain measured:
 - final max/mean absolute error 1664 / 7.2158.
 
 Absolute errors become large at sparse, very high-magnitude activations in the
-deep chain, so full-chain validation uses normalized RMS at every block with a
-fixed 5% gate; all blocks pass. This does not replace strict single-block
-coverage: the deterministic block integration still compares elementwise with
-`rtol=0.02`, `atol=0.003`. The CPU adapter was also checked against the
-installed Diffusers 0.39.0 authoritative 28-block chain and ended at about
-0.7% normalized RMS difference.
+deep chain. That earlier fixture passed its fixed 5% per-block gate; it is not
+the current real ComfyUI Base fixture below. This does not replace strict
+single-block coverage: the deterministic block integration still compares
+elementwise with `rtol=0.02`, `atol=0.003`. The CPU adapter was also checked
+against the installed Diffusers 0.39.0 authoritative 28-block chain and ended
+at about 0.7% normalized RMS difference.
 
 Turbo's separate 10% intermediate / 2% final chain gate is defined for the
 captured real preprocessing fixture used by the ComfyUI validation. The
@@ -211,6 +218,50 @@ default synthetic seed-0 input is deliberately outside that claim and was
 rejected at 9.61% final normalized RMS. Always pass a real captured fixture
 when reproducing the Turbo chain gate; the real one-step ComfyUI sampler test
 is the end-to-end oracle.
+
+## Q/K/V chaining measurements
+
+On 2026-10-06, the captured 1024-image-token / 512-context Base and Turbo
+fixtures measured the 23-dispatch path against Q/K/V chaining on the same
+resident runtime:
+
+| Metric | Separate projections | Q/K/V chained |
+|---|---:|---:|
+| XRT dispatches/block | 23 | 19 |
+| 28-block XRT dispatches | 644 | 532 |
+| H2D bytes/block | 298,188,800 | 288,751,616 |
+| H2D bytes/28-block chain (one denoising step) | 8,349,286,400 | 8,085,045,248 |
+| D2H-visible bytes/block | 314,048,512 | 314,048,512 |
+| D2H-visible bytes/28-block chain | 8,793,358,336 | 8,793,358,336 |
+| Reported BO allocation events/28-block chain | 542 | 630 |
+
+The 9,437,184-byte H2D reduction per block is one shared self-attention input
+and one shared cross-attention context input; the Q/K/V weights and all
+host-visible outputs are unchanged. The allocation-event counter includes
+per-key weight BO population; three output BOs per chain signature are reused
+across block keys after initial creation. A captured-fixture validation pair
+measured Base at 18.397 s -> 17.313 s and Turbo at 17.418 s -> 17.843 s.
+These are noisy chain-wall samples, not a stable speed claim or sampler
+timing.
+
+Every block output across the 28-block Base and Turbo fixtures was bitwise
+equal between the separate-projection and chained XDNA paths. Turbo's CPU
+oracle comparison passed its declared 10% intermediate / 2% final gate:
+0.0599236 worst at block 12 and 0.0117299 final. The real Base fixture's
+optimized and legacy XDNA outputs also match bitwise, but both show 0.0782801
+worst transient normalized RMS at block 14 against the strict 5% Base
+CPU-oracle gate; the final error is 0.00840710. This is reported as an
+existing Base numerical limitation, not treated as a Base gate pass or hidden
+by Turbo's wider intermediate threshold.
+
+The standalone ComfyUI-XDNA 8-step Euler/simple/CFG 1, seed 424242, 512x512
+Turbo workflow was repeated with only `qkv_chaining` changed. The paired warm
+execution measured 147.56 s disabled and 139.18 s enabled (5.68% lower);
+the RGB output pixels were identical (8-bit MAE 0). The first workflow after
+server startup was not used for the paired timing because cold/warm cache
+effects were visible. This remains CPU-hybrid: Qwen, all listed normalization,
+RoPE, softmax, GELU, residual/gate operations, sampler, final projection, and
+VAE remain on CPU. No NPU-only claim is made.
 
 Failures use distinct categories and exit codes: dependency unavailable (2),
 NPU unavailable (3), unsupported shape/config/dtype (4), compilation failure
@@ -302,7 +353,8 @@ CPU tests cover exact key/config discovery, lazy block loading, shape rejection,
 layout/padding, deterministic inputs, RoPE, attention masks, the complete CPU
 block residual path, block-index mapping, and CPU range execution. Real-NPU
 tests cover Linear, stitched-versus-legacy block attention, the optimized
-23-dispatch block, resident reuse, and the complete 28-block numerical chain:
+19-dispatch block, resident reuse, and the complete 28-block numerical chain
+with old/new Q/K/V output parity:
 
 ```powershell
 $env:ANIMA_XDNA_CHECKPOINT = "<DIFFUSERS_TRANSFORMER_SAFETENSORS>"

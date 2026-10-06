@@ -15,9 +15,12 @@ ComfyUI still executes:
 - LayerNorm/AdaLN, RMSNorm, softmax, GELU, gates, and residual operations
 - final projection/unpatchify, sampler orchestration, and Qwen Image VAE
 
-XDNA 2 executes all 644 Linear/QK/AV GEMM dispatches in the 28-block chain.
-Weights, kernel objects, contexts, and BOs remain resident between denoising
-steps. The wrapper never silently falls back to CPU.
+XDNA 2 executes 532 Linear/QK/AV GEMM dispatches in the default 28-block
+chain. The self/cross Q/K/V projection groups each run as one `NPUChain`
+dispatch; the optional `qkv_chaining=false` input restores the prior
+644-dispatch path for comparison. Weights, kernel objects, contexts, and BOs
+remain resident between denoising steps. The wrapper never silently falls
+back to CPU.
 
 ## Supported contract
 
@@ -66,6 +69,10 @@ starting ComfyUI. The packed cache defaults to
    immediate release is required. Garbage collection also releases the
    attachment.
 
+`qkv_chaining` defaults to enabled. It only fuses the three Q/K/V projection
+launches within each attention module; LayerNorm/AdaLN, RMSNorm, RoPE,
+scale/mask/softmax, GELU, gates, and residual operations remain on CPU.
+
 `rebuild_cache` explicitly recreates the packed cache. `cache_dir` may point
 to another user-writable ASCII path. It must not point into the model folder.
 
@@ -79,14 +86,18 @@ On Ryzen AI 9 365 / Strix XDNA 2 (`npu2`), XRT 2.21.75 and Triton-XDNA
 - real Qwen prompt, Euler, two steps: latent normalized RMS 0.01819
 - isolated cold wrapper call: 26.73 s, including 3,963,617,280 bytes of
   process-local weight BO population
-- second resident wrapper call: 7.73 s total / 7.57 s chain, 644 dispatches,
-  644 resident hits, zero weight population bytes and no recompile
+- historical pre-Q/K/V second resident wrapper call: 7.73 s total / 7.57 s
+  chain, 644 dispatches, 644 resident hits, zero weight population bytes and
+  no recompile
 - resident profiles count output bytes synchronized from XRT BOs to host
   visibility in `last_d2h_host_visible_bytes`; these are not additional
   staging-buffer allocations
 - real Qwen prompt, CFG 3.5, one denoising step: normalized RMS 0.04068
   (the two CFG branches execute sequentially on the single-tenant NPU)
 - decoded 512x512 images: PSNR 36.33 dB, SSIM 0.8458
+- current 28-block Q/K/V-chained path: 532 dispatches and 8,085,045,248 H2D
+  bytes per denoising step, versus 644 dispatches and 8,349,286,400 H2D bytes
+  with chaining disabled; device-to-host-visible output bytes are unchanged
 
 Turbo V1.1 was additionally validated from its native 685-tensor BF16
 checkpoint. A real Qwen/Euler/CFG 1 one-step sampler latent passed at
@@ -96,6 +107,13 @@ SSIM `0.82480`, and 8-bit MAE `10.884` against the CPU reference. The local
 recommendation. Turbo's synthetic chain has a transient block-13 normalized
 RMS peak of `0.08455` and final `0.01004`; use the documented separate
 10% intermediate / 2% final gate rather than Base's uniform 5% gate.
+On 2026-10-06, a same-server warm 8-step Euler/simple/CFG 1/seed 424242
+comparison measured 147.56 s with `qkv_chaining=false` and 139.18 s with it
+enabled. The final 512x512 RGB images were pixel-identical. A real Base
+preprocessing fixture exposed 7.828% transient CPU-oracle NRMS at block 14
+against the strict 5% Base gate; the chained and previous XDNA paths were
+bitwise equal at every block, with 0.8407% final NRMS. This is recorded as a
+Base oracle limitation, not a passing Base chain gate.
 
 The first call additionally verifies the 3.96 GB packed cache and populates
 process-local XRT BOs, so cold and warm timings must not be compared as the

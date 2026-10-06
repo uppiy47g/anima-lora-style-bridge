@@ -173,6 +173,8 @@ class XDNASession:
         self._previous_driver = None
         self._compiler = None
         self._head_chains = {}
+        self._qkv_chains = {}
+        self._qkv_output_buffers = {}
 
     def __enter__(self):
         self.triton, _, NPUDriver, _ = _imports()
@@ -188,6 +190,13 @@ class XDNASession:
             for chain in self._head_chains.values():
                 chain.close()
             self._head_chains.clear()
+            for chain in self._qkv_chains.values():
+                chain.close()
+            self._qkv_chains.clear()
+            for buffers in self._qkv_output_buffers.values():
+                for buffer in buffers:
+                    buffer.close()
+            self._qkv_output_buffers.clear()
             if self._compiler is not None:
                 self._compiler.__exit__(exc_type, exc_value, traceback)
         finally:
@@ -349,6 +358,179 @@ class XDNASession:
             True,
             kernel_sync_ms=elapsed,
         )
+
+    def dispatch_qkv_chain(
+        self,
+        prepared_qkv: tuple[PreparedLinear, PreparedLinear, PreparedLinear],
+        key: str,
+        shared_input: bool,
+    ) -> dict[str, Any]:
+        if self.triton is None:
+            raise ExecutionFailure("XDNASession must be entered before dispatch")
+        import numpy as np
+        from triton.backends.amd_triton_npu.multilaunch import NPUChain
+        from .kernel import bf16_linear_kernel
+
+        q, k, v = prepared_qkv
+        prepared = (q, k, v)
+        for item in prepared:
+            _validate_prepared(item)
+        if shared_input and (
+            q.input_bf16.shape != k.input_bf16.shape
+            or q.input_bf16.shape != v.input_bf16.shape
+        ):
+            raise UnsupportedTensor("shared Q/K/V input layouts must match")
+        signature = (
+            shared_input,
+            tuple(item.padded_shape for item in prepared),
+        )
+        chain = self._qkv_chains.get(signature)
+        if chain is None:
+            chain_name = "anima_qkv_" + "_".join(
+                str(value)
+                for shape in signature[1]
+                for value in shape
+            ) + ("_shared" if shared_input else "_separate")
+            chain = NPUChain(
+                chain_name,
+                air_project_path=str(
+                    Path.home() / ".cache" / "anima-xdna" / "air_project"
+                ),
+            )
+            outputs = tuple(
+                torch.empty(item.padded_shape[:2], dtype=torch.float32)
+                for item in prepared
+            )
+            transform = str(
+                Path.home() / ".cache" / "anima-xdna" / "transform_aie2p_ascii.mlir"
+            )
+            argument_maps = (
+                ((0, 1, 2), (0, 3, 4), (0, 5, 6))
+                if shared_input
+                else ((0, 1, 2), (3, 4, 5), (3, 6, 7))
+            )
+            for index, item in enumerate(prepared):
+                input_index, weight_index, output_index = argument_maps[index]
+                grid = (
+                    self.triton.cdiv(item.padded_shape[0], 256),
+                    self.triton.cdiv(item.padded_shape[1], 256),
+                )
+                chain.add(
+                    bf16_linear_kernel,
+                    grid,
+                    {0: input_index, 1: weight_index, 2: output_index},
+                    args=(item.input_bf16, item.weight_k_n_bf16, outputs[index]),
+                    constexprs={
+                        "M": item.padded_shape[0],
+                        "N": item.padded_shape[1],
+                        "K": item.padded_shape[2],
+                        "stride_im": item.input_bf16.stride(0),
+                        "stride_ik": item.input_bf16.stride(1),
+                        "stride_wk": item.weight_k_n_bf16.stride(0),
+                        "stride_wn": item.weight_k_n_bf16.stride(1),
+                        "stride_om": outputs[index].stride(0),
+                        "stride_on": outputs[index].stride(1),
+                        "BLOCK_M": 256,
+                        "BLOCK_N": 256,
+                        "BLOCK_K": item.padded_shape[2],
+                    },
+                    transform_script=transform,
+                )
+            self._qkv_chains[signature] = chain
+
+        arrays = []
+        for index, item in enumerate(prepared):
+            if index == 0:
+                arrays.append(ResidentXDNASession._bf16_numpy(item.input_bf16))
+            elif not shared_input and index == 1:
+                arrays.append(ResidentXDNASession._bf16_numpy(item.input_bf16))
+            arrays.extend(
+                (
+                    ResidentXDNASession._bf16_numpy(item.weight_k_n_bf16),
+                    np.empty(item.padded_shape[:2], dtype=np.float32),
+                )
+            )
+        output_indices = {2, 4, 6} if shared_input else {2, 5, 7}
+        static_indices = {1, 3, 5} if shared_input else {1, 4, 6}
+        populated_keys = getattr(chain, "_anima_populated_keys", set())
+        first_call = key not in populated_keys
+        output_buffers = self._qkv_output_buffers.get(signature)
+        output_buffers_created = output_buffers is None
+        if output_buffers is None:
+            from triton.backends.amd_triton_npu import shared
+
+            created_buffers = []
+            try:
+                for item in prepared:
+                    created_buffers.append(
+                        shared.empty(
+                            item.padded_shape[:2],
+                            dtype=torch.float32,
+                            device="xrt:0",
+                        )
+                    )
+            except Exception:
+                for buffer in created_buffers:
+                    buffer.close()
+                raise
+            output_buffers = tuple(created_buffers)
+            self._qkv_output_buffers[signature] = output_buffers
+        bound_buffers = {}
+        for buffer_index, output_index in enumerate(sorted(output_indices)):
+            buffer = output_buffers[buffer_index]
+            arrays[output_index] = buffer.numpy()
+            bound_buffers[output_index] = buffer.bo
+        started = time.perf_counter()
+        try:
+            outputs = chain.run(
+                arrays,
+                bo_key=key,
+                static_indices=static_indices,
+                intermediate_indices=output_indices,
+                output_indices=output_indices,
+                bound_buffers=bound_buffers,
+            )
+            populated_keys.add(key)
+            chain._anima_populated_keys = populated_keys
+        except Exception as error:
+            if _is_compilation_error(error):
+                raise CompilationFailure(
+                    f"Triton-XDNA could not compile the Q/K/V chain: {error}"
+                ) from error
+            raise ExecutionFailure(f"XDNA Q/K/V chain execution failed: {error}") from error
+        elapsed = (time.perf_counter() - started) * 1000
+        output_indices_order = (2, 4, 6) if shared_input else (2, 5, 7)
+        logical_outputs = tuple(
+            torch.from_numpy(outputs[index])[
+                : item.rows, : item.out_features
+            ].to(torch.bfloat16)
+            for item, index in zip(prepared, output_indices_order)
+        )
+        dynamic_indices = (0,) if shared_input else (0, 3)
+        h2d_bytes = sum(arrays[index].nbytes for index in dynamic_indices)
+        if first_call:
+            h2d_bytes += sum(arrays[index].nbytes for index in static_indices)
+        d2h_bytes = sum(arrays[index].nbytes for index in output_indices_order)
+        return {
+            "outputs": logical_outputs,
+            "wall_ms": elapsed,
+            "dispatches": 1,
+            "h2d_bytes": h2d_bytes,
+            "d2h_bytes": d2h_bytes,
+            "allocation_count": (
+                len(static_indices)
+                + len(dynamic_indices)
+                + (3 if output_buffers_created else 0)
+            )
+            if first_call
+            else 0,
+            "resident_hits": 0 if first_call else len(static_indices),
+            "weight_population_bytes": sum(
+                arrays[index].nbytes for index in static_indices
+            )
+            if first_call
+            else 0,
+        }
 
 
 class _ResidentKernelRunner:

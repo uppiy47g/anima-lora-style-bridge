@@ -1,7 +1,9 @@
 """Resident multi-block Anima execution for future ComfyUI integration."""
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import tempfile
 import time
 from typing import Optional
 
@@ -69,6 +71,7 @@ class AnimaXDNAChainRuntime:
         weight_cache: bool = True,
         cache_dir: Optional[Path] = None,
         rebuild_cache: bool = False,
+        qkv_chaining: bool = True,
     ):
         self.checkpoint = Path(checkpoint)
         self.config: AnimaBlockConfig = load_checkpoint_config(
@@ -78,10 +81,12 @@ class AnimaXDNAChainRuntime:
         self.weight_cache_enabled = weight_cache
         self.cache_dir = cache_dir
         self.rebuild_cache = rebuild_cache
+        self.qkv_chaining = qkv_chaining
         self._weights: dict[int, AnimaBlockWeights] = {}
         self._session: Optional[ResidentXDNASession] = None
         self._packed_cache: Optional[PackedWeightCache] = None
         self.cache_status: Optional[CacheStatus] = None
+        self._fixture_captured = False
 
     def __enter__(self):
         if self._session is not None:
@@ -177,6 +182,47 @@ class AnimaXDNAChainRuntime:
             inputs.attention_mask,
         )
 
+    def _capture_fixture(self, inputs: BlockInputs) -> None:
+        if self._fixture_captured:
+            return
+        target_value = os.environ.get("ANIMA_XDNA_CHAIN_FIXTURE")
+        if not target_value:
+            return
+        if not target_value.isascii():
+            raise UnsupportedTensor(
+                "ANIMA_XDNA_CHAIN_FIXTURE must use an ASCII cache path"
+            )
+        target = Path(target_value)
+        if target.exists():
+            raise FileExistsError(
+                f"refusing to overwrite captured Anima inputs: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "hidden_states": inputs.hidden_states.detach().cpu(),
+            "encoder_hidden_states": inputs.encoder_hidden_states.detach().cpu(),
+            "embedded_timestep": inputs.embedded_timestep.detach().cpu(),
+            "temb": inputs.temb.detach().cpu(),
+            "cos": inputs.image_rotary_emb[0].detach().cpu(),
+            "sin": inputs.image_rotary_emb[1].detach().cpu(),
+            "attention_mask": (
+                None
+                if inputs.attention_mask is None
+                else inputs.attention_mask.detach().cpu()
+            ),
+        }
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=target.name + ".", suffix=".tmp", dir=target.parent
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            torch.save(payload, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self._fixture_captured = True
+
     @staticmethod
     def _validate_range(start: int, end: int) -> None:
         if not 0 <= start < end <= 28:
@@ -193,6 +239,7 @@ class AnimaXDNAChainRuntime:
         self._validate_range(start, end)
         if self._session is None:
             raise RuntimeError("AnimaXDNAChainRuntime must be entered before execution")
+        self._capture_fixture(inputs)
         self._ensure_packed_cache(start, end)
         hidden = inputs.hidden_states
         profiles = []
@@ -208,6 +255,7 @@ class AnimaXDNAChainRuntime:
                 resident_key=f"block{index}",
                 packed_cache=self._packed_cache,
                 block_index=index,
+                qkv_chaining=self.qkv_chaining,
             )
             wall_ms = (time.perf_counter() - started) * 1000
             hidden = result.output
@@ -247,6 +295,7 @@ class AnimaXDNAChainRuntime:
         self._validate_range(start, end)
         if self._session is None:
             raise RuntimeError("AnimaXDNAChainRuntime must be entered before execution")
+        self._capture_fixture(inputs)
         self._ensure_packed_cache(start, end)
         cpu_hidden = inputs.hidden_states
         xdna_hidden = inputs.hidden_states
@@ -269,6 +318,7 @@ class AnimaXDNAChainRuntime:
                 resident_key=f"block{index}",
                 packed_cache=self._packed_cache,
                 block_index=index,
+                qkv_chaining=self.qkv_chaining,
             )
             xdna_ms = (time.perf_counter() - started) * 1000
             cpu_hidden = cpu_result.output

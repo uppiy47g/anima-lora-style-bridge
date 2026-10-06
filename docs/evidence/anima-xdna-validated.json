@@ -1,7 +1,7 @@
 {
   "$schema": "./anima-xdna-evidence.schema.json",
-  "schema_version": 1,
-  "recorded_date": "2026-10-02",
+  "schema_version": 2,
+  "recorded_date": "2026-10-06",
   "source_commits": {
     "linear": "a37158b",
     "block": "1f4db24",
@@ -9,6 +9,7 @@
     "packed_cache": "ae427d7",
     "comfyui_wrapper": "737338d76bf2a7dcf9806aaba5d6d936499b95ab",
     "turbo_support": "commit containing this evidence record",
+    "qkv_chaining": "commit containing this evidence record",
     "comfyui": "170594057a22673349ddf0a3d88624b7fa5865bb"
   },
   "tested_system": {
@@ -191,6 +192,7 @@
         "d2h_bytes": 70346866688
       },
       "comparison_with_historical_accounting": {
+        "scope": "profiling-only phase before Q/K/V chaining",
         "dispatches_per_block_before": 23,
         "dispatches_per_block_after": 23,
         "h2d_bytes_per_block_before": 156631040,
@@ -207,8 +209,103 @@
       },
       "turbo_end_to_end": {
         "previous_validated_seconds": 136.47,
-        "rerun_status": "not_run",
-        "reason": "The isolated ComfyUI server was not running during this phase; no new full workflow result or speedup is claimed."
+        "rerun_status": "measured_controlled_qkv_pair",
+        "qkv_chaining_disabled_seconds": 147.56,
+        "qkv_chaining_enabled_seconds": 139.18,
+        "improvement_seconds": 8.38,
+        "improvement_percent": 5.68,
+        "image_pixel_equal": true,
+        "image_mae_8bit": 0.0,
+        "comparison_scope": "same-server warm pair, identical settings and inputs"
+      },
+      "qkv_chaining": {
+        "status": "measured",
+        "recorded_date": "2026-10-06",
+        "implementation": "Self and cross Q/K/V BF16 Linear launches grouped in NPUChain; public shared.empty output buffers are session-owned and rebound with bound_buffers.",
+        "host_operations_moved": false,
+        "block_to_block_activation_residency": false,
+        "per_block": {
+          "dispatches_before": 23,
+          "dispatches_after": 19,
+          "h2d_bytes_before": 298188800,
+          "h2d_bytes_after": 288751616,
+          "d2h_visible_bytes_before": 314048512,
+          "d2h_visible_bytes_after": 314048512
+        },
+        "chain_28": {
+          "dispatches_before": 644,
+          "dispatches_after": 532,
+          "h2d_bytes_before": 8349286400,
+          "h2d_bytes_after": 8085045248,
+          "h2d_bytes_saved": 264241152,
+          "d2h_visible_bytes_before": 8793358336,
+          "d2h_visible_bytes_after": 8793358336,
+          "reported_bo_allocation_events_before": 542,
+          "reported_bo_allocation_events_after": 630,
+          "base_v1_0": {
+            "separate_xdna_wall_seconds": 18.3973206,
+            "chained_xdna_wall_seconds": 17.313392,
+            "timing_note": "single captured-fixture validation pair; not claimed as a stable chain-speed benchmark"
+          },
+          "turbo_v1_1": {
+            "separate_xdna_wall_seconds": 17.4180386,
+            "chained_xdna_wall_seconds": 17.8432669,
+            "timing_note": "single captured-fixture validation pair; not claimed as a stable chain-speed benchmark"
+          }
+        },
+        "eight_step_transfer_projection": {
+          "status": "derived_from_measured_28_block_chain",
+          "dispatches_before": 5152,
+          "dispatches_after": 4256,
+          "h2d_bytes_before": 66794291200,
+          "h2d_bytes_after": 64680361984,
+          "d2h_visible_bytes_before": 70346866688,
+          "d2h_visible_bytes_after": 70346866688
+        },
+        "base_v1_0_real_fixture": {
+          "fixture": "Local ComfyUI Qwen/preprocessing capture; not distributed",
+          "intermediate_gate": 0.05,
+          "final_gate": 0.02,
+          "worst_block": 14,
+          "worst_cpu_oracle_nrms": 0.07828005185861475,
+          "final_cpu_oracle_nrms": 0.008407096848914285,
+          "gate_status": "failed_in_both_paths",
+          "old_new_xdna_block_outputs_bitwise_equal": true
+        },
+        "turbo_v1_1_real_fixture": {
+          "fixture": "Local ComfyUI Qwen/preprocessing capture; not distributed",
+          "intermediate_gate": 0.10,
+          "final_gate": 0.02,
+          "worst_block": 12,
+          "worst_cpu_oracle_nrms": 0.0599235544590232,
+          "final_cpu_oracle_nrms": 0.011729881436628271,
+          "gate_status": "passed",
+          "old_new_xdna_block_outputs_bitwise_equal": true
+        },
+        "turbo_v1_1_comfyui": {
+          "status": "measured_controlled_warm_pair",
+          "settings": {
+            "prompt": "a cheerful anime girl under cherry blossoms, detailed illustration, soft daylight",
+            "negative_prompt": "worst quality, low quality, blurry, jpeg artifacts",
+            "seed": 424242,
+            "sampler": "Euler",
+            "scheduler": "simple",
+            "steps": 8,
+            "cfg": 1.0,
+            "width": 512,
+            "height": 512
+          },
+          "qkv_chaining_disabled_execution_seconds": 147.56,
+          "qkv_chaining_enabled_execution_seconds": 139.18,
+          "qkv_chaining_disabled_api_wall_seconds": 153.816,
+          "qkv_chaining_enabled_api_wall_seconds": 140.842,
+          "improvement_seconds": 8.38,
+          "improvement_percent": 5.68,
+          "image_pixel_equal": true,
+          "image_mae_8bit": 0.0,
+          "image_artifacts_distributed": false,
+          "timing_note": "same standalone ComfyUI server after warm-up; initial post-startup workflow excluded from the pair"
+        }
       },
       "synthetic_base_chain_followup": {
         "status": "gate_failed_not_used_as_validation",
