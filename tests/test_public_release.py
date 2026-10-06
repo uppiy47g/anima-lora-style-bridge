@@ -42,6 +42,30 @@ class PublicReleaseTests(unittest.TestCase):
             evidence["measurements"]["user_observation_20_step"]["status"],
             "observational_non_controlled",
         )
+        memory = evidence["measurements"]["cpu_model_memory"]
+        self.assertEqual(
+            memory["end_to_end_dtype_validation"],
+            "passed_image_gate_with_latent_cpu_difference",
+        )
+        bf16_workflow = memory["bf16_turbo_v1_1_comfyui"]
+        self.assertTrue(
+            bf16_workflow["image_comparison_to_previous_validated_xdna"][
+                "pixel_equal"
+            ]
+        )
+        self.assertFalse(
+            bf16_workflow["image_comparison_to_stock_fp32_cpu"]["pixel_equal"]
+        )
+        self.assertAlmostEqual(
+            bf16_workflow["latent_comparison_to_stock_fp32_cpu"][
+                "normalized_rms_error"
+            ],
+            0.2554629743,
+        )
+        self.assertIn(
+            "not a controlled speed comparison",
+            bf16_workflow["timing_note"],
+        )
         turbo = evidence["measurements"]["turbo_v1_1"]
         self.assertNotEqual(
             turbo["source_block_fingerprint"],

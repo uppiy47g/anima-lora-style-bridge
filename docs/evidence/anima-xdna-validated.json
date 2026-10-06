@@ -447,9 +447,60 @@
         },
         "cleanup_note": "SharedRuntime.close released the runtime and its XRT session; Python/runtime allocators did not return all process commit before process exit. The attachment still retains normal shared ModelPatcher Parameters; no destructive weight release was attempted."
       },
+      "bf16_turbo_v1_1_comfyui": {
+        "status": "measured_matching_workflow",
+        "comfyui_commit": "170594057a22673349ddf0a3d88624b7fa5865bb",
+        "settings": {
+          "model": "native Anima Turbo V1.1",
+          "model_dtype": "bfloat16",
+          "xdna_source": "same native Turbo V1.1 checkpoint",
+          "text_encoder": "Qwen 3 0.6B",
+          "vae": "Qwen Image VAE",
+          "prompt": "a cheerful anime girl under cherry blossoms, detailed illustration, soft daylight",
+          "negative_prompt": "worst quality, low quality, blurry, jpeg artifacts",
+          "seed": 424242,
+          "sampler": "Euler",
+          "scheduler": "simple",
+          "steps": 8,
+          "cfg": 1.0,
+          "width": 512,
+          "height": 512,
+          "qkv_chaining": true
+        },
+        "bf16_xdna": {
+          "api_wall_seconds": 140.3162288,
+          "comfy_execution_seconds": 135.936,
+          "latent_shape": [1, 16, 1, 64, 64],
+          "latent_rms": 1.2368947268,
+          "output_image_sha256": "28b50de71e397429c597cb77773a10642957c44c9c2484cb0add0d2567b603f5"
+        },
+        "stock_fp32_cpu_reference": {
+          "api_wall_seconds": 115.3368555,
+          "comfy_execution_seconds": 113.005,
+          "latent_rms": 1.2388564348,
+          "reproduces_previous_reference_image_pixelwise": true
+        },
+        "latent_comparison_to_stock_fp32_cpu": {
+          "normalized_rms_error": 0.2554629743,
+          "max_abs_error": 3.8654255867,
+          "mean_abs_error": 0.1698338240,
+          "interpretation": "This compares the BF16+XDNA latent to the stock-FP32 CPU reference; the previous validated XDNA 8-step latent was not retained, so latent parity to the prior XDNA baseline is not established."
+        },
+        "image_comparison_to_stock_fp32_cpu": {
+          "psnr_db": 19.8550592547,
+          "ssim": 0.824799478,
+          "mae_8bit": 10.88412729899,
+          "pixel_equal": false
+        },
+        "image_comparison_to_previous_validated_xdna": {
+          "pixel_equal": true,
+          "mae_8bit": 0.0
+        },
+        "timing_note": "One BF16+XDNA run and one stock-FP32 CPU run on separate fresh standalone server launches. Timings are observations, not a controlled speed comparison or speedup claim."
+      },
       "xrt_bo_accounting": "XRT BO weight_population_bytes and process commit counters are separate observations. Do not add BO bytes to CPU Parameter bytes because XRT allocations may be unified/shared with host memory.",
-      "end_to_end_dtype_validation": "not_run",
-      "dtype_quality_limit": "The paired measurements establish memory reduction only. A BF16 ComfyUI sampler latent/image comparison against the validated FP32 workflow has not been run; CPU pre/post-block arithmetic can differ."
+      "end_to_end_dtype_validation": "passed_image_gate_with_latent_cpu_difference",
+      "dtype_quality_limit": "The BF16 Turbo 8-step decoded image is pixel-identical to the previous validated XDNA output, and its FP32 CPU reference run reproduces the previous CPU reference image. Its latent differs from the stock-FP32 CPU latent by 25.55% normalized RMS; no previous XDNA latent was retained for a direct latent-parity check. No timing speedup is claimed."
     },
     "user_observation_20_step": {
       "status": "observational_non_controlled",

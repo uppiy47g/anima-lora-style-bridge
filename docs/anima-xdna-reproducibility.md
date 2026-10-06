@@ -148,10 +148,9 @@ mutate or release shared model weights.
 
 The explicit BF16 option changes CPU pre/post-block computation dtype compared
 with CPU-default FP32. The native checkpoint values are BF16 in both Base and
-Turbo, but end-to-end latent/image equivalence must be checked for a workflow
-before treating a dtype change as bitwise-neutral. The XDNA block weights,
-canonical fingerprint, QKV dispatch path, and output conversion remain
-unchanged. The status data records measured Parameter storage; transient
+Turbo; the XDNA block weights, canonical fingerprint, QKV dispatch path, and
+output conversion remain unchanged. A full Turbo workflow comparison is now
+recorded below. The status data records measured Parameter storage; transient
 loader peak commit/working set and system-wide unified-memory pressure are
 separate quantities and must not be inferred from the Parameter count alone.
 
@@ -196,12 +195,31 @@ return all commit before process exit. XRT BO byte counts and CPU Parameter
 bytes remain separately reported because unified-memory allocations must not
 be double-counted.
 
+The exact Turbo workflow was then run through the actual BF16 loader and XDNA
+attach nodes, followed by a fresh stock-FP32 CPU reference with matching
+inputs: Qwen 3 0.6B, Qwen Image VAE, 512x512, seed 424242, Euler/simple,
+CFG 1, 8 steps, and the prompt/negative prompt above. The BF16+XDNA run took
+140.316 s API wall / 135.936 s Comfy execution; the FP32 CPU reference took
+115.337 s API wall / 113.005 s execution. These are single measurements from
+separate fresh server launches, not a controlled performance pair, and no
+speedup is claimed.
+
+The BF16+XDNA 512x512 output is **pixel-identical** to the previous validated
+XDNA image. The fresh FP32 CPU run is also pixel-identical to the previously
+validated CPU reference image, confirming the reconstructed workflow inputs.
+Thus BF16 retained the existing XDNA decoded-image result: against the CPU
+reference the image has PSNR 19.8551 dB, SSIM 0.824799, and 8-bit MAE 10.8841,
+the same previously reported quality tradeoff. The BF16+XDNA latent compared
+to the stock-FP32 CPU latent has normalized RMS error 0.255463, maximum
+absolute error 3.86543, and mean absolute error 0.169834. The previous XDNA
+latent was not retained, so direct BF16-vs-previous-XDNA latent parity is
+unverified; the established gate here is decoded-image parity to that
+validated XDNA output, not FP32 CPU latent equality.
+
 This establishes a material CPU-model memory reduction without deleting or
-replacing shared ModelPatcher Parameters. It does **not** establish BF16
-sampler latent/image equivalence: CPU preprocessing and final-layer arithmetic
-can differ from the prior FP32 workflow. The BF16 Turbo 8-step Euler/simple/
-CFG-1 seed-424242 ComfyUI pair remains unrun, so the previous 139.18 s /
-pixel-identical QKV-chaining result is not claimed for this loader change.
+replacing shared ModelPatcher Parameters. It does not demonstrate a runtime
+speedup, and the latent-vs-CPU difference remains a limitation despite exact
+decoded-image reproduction of the validated XDNA result.
 
 The API JSON in [`../examples/anima_xdna_512_api.json`](../examples/anima_xdna_512_api.json)
 is a minimal insertion/status fragment, not a redistributable model workflow.

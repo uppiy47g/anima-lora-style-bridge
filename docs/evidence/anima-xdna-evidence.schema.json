@@ -50,6 +50,7 @@
             "turbo_v1_1",
             "stock_fp32_memory_comparison",
             "bf16_xrt_residency",
+            "bf16_turbo_v1_1_comfyui",
             "xrt_bo_accounting",
             "end_to_end_dtype_validation"
           ],
@@ -66,8 +67,17 @@
             "turbo_v1_1": {"$ref": "#/$defs/cpuModelMemoryRun"},
             "stock_fp32_memory_comparison": {"$ref": "#/$defs/stockFp32MemoryComparison"},
             "bf16_xrt_residency": {"$ref": "#/$defs/bf16XrtResidency"},
+            "bf16_turbo_v1_1_comfyui": {"$ref": "#/$defs/bf16TurboComfyWorkflow"},
             "xrt_bo_accounting": {"type": "string", "minLength": 1},
-            "end_to_end_dtype_validation": {"enum": ["not_run", "passed", "failed"]}
+            "end_to_end_dtype_validation": {
+              "enum": [
+                "not_run",
+                "passed",
+                "passed_image_gate_with_latent_cpu_difference",
+                "failed"
+              ]
+            },
+            "dtype_quality_limit": {"type": "string", "minLength": 1}
           }
         }
       }
@@ -420,6 +430,75 @@
           "private_commit_after_close_gc": {"type": "integer", "minimum": 0},
           "working_set_after_close_gc": {"type": "integer", "minimum": 0},
           "model_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      },
+      "bf16TurboComfyWorkflow": {
+        "type": "object",
+        "required": [
+          "status",
+          "comfyui_commit",
+          "settings",
+          "bf16_xdna",
+          "stock_fp32_cpu_reference",
+          "latent_comparison_to_stock_fp32_cpu",
+          "image_comparison_to_stock_fp32_cpu",
+          "image_comparison_to_previous_validated_xdna",
+          "timing_note"
+        ],
+        "properties": {
+          "status": {"const": "measured_matching_workflow"},
+          "comfyui_commit": {"type": "string", "minLength": 1},
+          "settings": {"type": "object"},
+          "bf16_xdna": {
+            "type": "object",
+            "required": ["api_wall_seconds", "comfy_execution_seconds", "latent_shape", "latent_rms", "output_image_sha256"],
+            "properties": {
+              "api_wall_seconds": {"type": "number", "minimum": 0},
+              "comfy_execution_seconds": {"type": "number", "minimum": 0},
+              "latent_shape": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 5, "maxItems": 5},
+              "latent_rms": {"type": "number", "minimum": 0},
+              "output_image_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          },
+          "stock_fp32_cpu_reference": {
+            "type": "object",
+            "required": ["api_wall_seconds", "comfy_execution_seconds", "latent_rms", "reproduces_previous_reference_image_pixelwise"],
+            "properties": {
+              "api_wall_seconds": {"type": "number", "minimum": 0},
+              "comfy_execution_seconds": {"type": "number", "minimum": 0},
+              "latent_rms": {"type": "number", "minimum": 0},
+              "reproduces_previous_reference_image_pixelwise": {"type": "boolean"}
+            }
+          },
+          "latent_comparison_to_stock_fp32_cpu": {
+            "type": "object",
+            "required": ["normalized_rms_error", "max_abs_error", "mean_abs_error", "interpretation"],
+            "properties": {
+              "normalized_rms_error": {"type": "number", "minimum": 0},
+              "max_abs_error": {"type": "number", "minimum": 0},
+              "mean_abs_error": {"type": "number", "minimum": 0},
+              "interpretation": {"type": "string", "minLength": 1}
+            }
+          },
+          "image_comparison_to_stock_fp32_cpu": {
+            "type": "object",
+            "required": ["psnr_db", "ssim", "mae_8bit", "pixel_equal"],
+            "properties": {
+              "psnr_db": {"type": "number", "minimum": 0},
+              "ssim": {"type": "number", "minimum": 0, "maximum": 1},
+              "mae_8bit": {"type": "number", "minimum": 0},
+              "pixel_equal": {"type": "boolean"}
+            }
+          },
+          "image_comparison_to_previous_validated_xdna": {
+            "type": "object",
+            "required": ["pixel_equal", "mae_8bit"],
+            "properties": {
+              "pixel_equal": {"type": "boolean"},
+              "mae_8bit": {"type": "number", "minimum": 0}
+            }
+          },
+          "timing_note": {"type": "string", "minLength": 1}
         }
       }
   },

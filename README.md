@@ -21,7 +21,10 @@ The `Load Anima (BF16)` node retains native checkpoint precision instead of
 ComfyUI's stock CPU FP32 expansion. Fresh-process measurements for both Base
 and Turbo showed about 7.12 GB lower process PrivateUsage after model load
 (46.5%); the normal ModelPatcher-shared Parameters are retained, not deleted.
-The BF16 loader's sampler/image quality equivalence has not yet been measured.
+An identical Turbo 8-step BF16+XDNA run reproduced the prior validated XDNA
+image pixel-for-pixel. Its latent differs from the stock-FP32 CPU reference by
+25.55% normalized RMS, so this establishes decoded-image parity with the
+previous XDNA path, not latent equivalence to CPU.
 
 The 2026-10-06 optimization chains each self/cross-attention Q/K/V projection
 group into one XRT dispatch and reuses session-owned output buffers. On the

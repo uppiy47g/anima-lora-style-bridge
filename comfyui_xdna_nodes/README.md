@@ -90,8 +90,11 @@ Fresh-process measurements on the validated host found stock FP32 loading
 used about 7.12 GB more process PrivateUsage than BF16 loading for either
 checkpoint (46.5%); see the evidence for working-set and peak counters. A
 separate BF16-plus-XRT fixture run verified matching Base/Turbo fingerprints
-and resident BO reuse. It did not validate sampler/image equivalence for the
-BF16 CPU pre/post-block arithmetic.
+and resident BO reuse. The exact Turbo 8-step Euler/simple/CFG-1/seed-424242
+BF16+XDNA workflow reproduced the previous validated XDNA image pixelwise;
+the latent differs from the stock-FP32 CPU reference by 25.55% normalized
+RMS. This supports decoded-image parity with the prior XDNA path, not latent
+equivalence to CPU or a speedup claim.
 
 ## Verified result
 
@@ -137,8 +140,8 @@ process-local XRT BOs, so cold and warm timings must not be compared as the
 same phase.
 
 Measured BF16 loader details, Windows process-memory methodology, the
-stock-FP32/BF16 memory pair, and the unrun end-to-end dtype-equivalence gate
-are recorded in the [reproducibility report](../docs/anima-xdna-reproducibility.md).
+stock-FP32/BF16 memory pair, and the end-to-end image/latent comparison are
+recorded in the [reproducibility report](../docs/anima-xdna-reproducibility.md).
 
 If an applied LoRA/ModelPatcher patch, unsupported shape, incompatible
 ComfyUI API, cache corruption, XRT failure, or numerical/runtime error is
