@@ -66,6 +66,34 @@ class PublicReleaseTests(unittest.TestCase):
             "not a controlled speed comparison",
             bf16_workflow["timing_note"],
         )
+        reverification = bf16_workflow["paired_runtime_reverification"]
+        runtime = reverification["runtime"]
+        self.assertEqual(reverification["status"], "measured_sequential_sampler_pair")
+        self.assertEqual(runtime["source_fingerprint"], runtime["model_fingerprint"])
+        self.assertEqual(runtime["block_parameter_dtype"], "bfloat16")
+        self.assertEqual(runtime["block_parameter_count"], 560)
+        self.assertEqual(runtime["dispatches_per_chain"], 532)
+        self.assertTrue(runtime["unload_closed"])
+        self.assertEqual(runtime["reference_count_after_unload"], 0)
+        self.assertTrue(
+            reverification["image"]["first_vs_previous_qkv_path_pixel_equal"]
+        )
+        for comparison in reverification["latent_comparisons"].values():
+            self.assertTrue(comparison["bitwise_equal"])
+            self.assertEqual(
+                (comparison["max_abs"], comparison["mean_abs"], comparison["nrms"]),
+                (0.0, 0.0, 0.0),
+            )
+        memory_run = reverification["process_memory"]
+        self.assertGreater(
+            memory_run["peak_sampled_during_pair"]["private_usage_bytes"],
+            memory_run["after_unload_gc"]["private_usage_bytes"],
+        )
+        self.assertIn("included earlier validation runs", memory_run["methodology"])
+        self.assertEqual(
+            schema["$defs"]["processMemorySample"]["required"],
+            ["private_usage_bytes", "working_set_bytes"],
+        )
         turbo = evidence["measurements"]["turbo_v1_1"]
         self.assertNotEqual(
             turbo["source_block_fingerprint"],

@@ -498,9 +498,152 @@
               "mae_8bit": {"type": "number", "minimum": 0}
             }
           },
-          "timing_note": {"type": "string", "minLength": 1}
+          "timing_note": {"type": "string", "minLength": 1},
+          "paired_runtime_reverification": {
+            "type": "object",
+            "required": [
+              "status",
+              "paired_prompt_api_wall_seconds",
+              "paired_prompt_comfy_execution_seconds",
+              "sampler_node_execution_seconds",
+              "runtime",
+              "latent_comparisons",
+              "image",
+              "process_memory",
+              "xrt_bo_accounting",
+              "timing_note"
+            ],
+            "properties": {
+              "status": {"const": "measured_sequential_sampler_pair"},
+              "paired_prompt_api_wall_seconds": {"type": "number", "minimum": 0},
+              "paired_prompt_comfy_execution_seconds": {"type": "number", "minimum": 0},
+              "sampler_node_execution_seconds": {
+                "type": "object",
+                "required": ["first_KSampler", "resident_KSamplerAdvanced"],
+                "properties": {
+                  "first_KSampler": {"type": "number", "minimum": 0},
+                  "resident_KSamplerAdvanced": {"type": "number", "minimum": 0}
+                }
+              },
+              "runtime": {
+                "type": "object",
+                "required": [
+                  "source_fingerprint",
+                  "model_fingerprint",
+                  "fingerprints_match",
+                  "block_parameter_dtype",
+                  "block_parameter_count",
+                  "block_parameter_bytes",
+                  "dispatches_per_chain",
+                  "last_chain_weight_population_bytes",
+                  "unload_closed",
+                  "reference_count_after_unload"
+                ],
+                "properties": {
+                  "source_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "model_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "fingerprints_match": {"const": true},
+                  "block_parameter_dtype": {"const": "bfloat16"},
+                  "block_parameter_count": {"const": 560},
+                  "block_parameter_bytes": {"type": "integer", "minimum": 1},
+                  "dispatches_per_chain": {"const": 532},
+                  "last_chain_weight_population_bytes": {"type": "integer", "minimum": 0},
+                  "unload_closed": {"const": true},
+                  "reference_count_after_unload": {"const": 0}
+                }
+              },
+              "latent_comparisons": {
+                "type": "object",
+                "required": ["resident_vs_first", "first_vs_previous_bf16_xdna"],
+                "properties": {
+                  "resident_vs_first": {"$ref": "#/$defs/bitwiseTensorComparison"},
+                  "first_vs_previous_bf16_xdna": {"$ref": "#/$defs/bitwiseTensorComparison"}
+                }
+              },
+              "image": {
+                "type": "object",
+                "required": [
+                  "first_vs_resident_pixel_equal",
+                  "first_vs_previous_qkv_path_pixel_equal",
+                  "png_sha256",
+                  "png_size_bytes",
+                  "dimensions",
+                  "mode",
+                  "metadata_entries"
+                ],
+                "properties": {
+                  "first_vs_resident_pixel_equal": {"const": true},
+                  "first_vs_previous_qkv_path_pixel_equal": {"const": true},
+                  "png_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "png_size_bytes": {"type": "integer", "minimum": 1},
+                  "dimensions": {"const": [512, 512]},
+                  "mode": {"const": "RGB"},
+                  "metadata_entries": {"type": "integer", "minimum": 0}
+                }
+              },
+              "process_memory": {
+                "type": "object",
+                "required": [
+                  "methodology",
+                  "sample_count",
+                  "before_workflow",
+                  "after_bf16_loader",
+                  "after_xdna_attach",
+                  "peak_sampled_during_pair",
+                  "after_unload_gc",
+                  "server_lifetime_peak_counters"
+                ],
+                "properties": {
+                  "methodology": {"type": "string", "minLength": 1},
+                  "sample_count": {"type": "integer", "minimum": 1},
+                  "before_workflow": {"$ref": "#/$defs/processMemorySample"},
+                  "after_bf16_loader": {"$ref": "#/$defs/processMemorySample"},
+                  "after_xdna_attach": {"$ref": "#/$defs/processMemorySample"},
+                  "peak_sampled_during_pair": {"$ref": "#/$defs/processMemorySample"},
+                  "after_unload_gc": {"$ref": "#/$defs/processMemorySample"},
+                  "server_lifetime_peak_counters": {
+                    "type": "object",
+                    "required": ["peak_private_commit_bytes", "peak_working_set_bytes", "scope_note"],
+                    "properties": {
+                      "peak_private_commit_bytes": {"type": "integer", "minimum": 0},
+                      "peak_working_set_bytes": {"type": "integer", "minimum": 0},
+                      "scope_note": {"type": "string", "minLength": 1}
+                    }
+                  }
+                }
+              },
+              "xrt_bo_accounting": {
+                "type": "object",
+                "required": ["last_resident_weight_population_bytes", "cache_packed_payload_bytes", "note"],
+                "properties": {
+                  "last_resident_weight_population_bytes": {"type": "integer", "minimum": 0},
+                  "cache_packed_payload_bytes": {"type": "integer", "minimum": 1},
+                  "note": {"type": "string", "minLength": 1}
+                }
+              },
+              "timing_note": {"type": "string", "minLength": 1}
+            }
+          }
         }
-      }
+      },
+      "bitwiseTensorComparison": {
+          "type": "object",
+          "required": ["max_abs", "mean_abs", "nrms", "bitwise_equal"],
+          "properties": {
+            "max_abs": {"type": "number", "minimum": 0},
+            "mean_abs": {"type": "number", "minimum": 0},
+            "nrms": {"type": "number", "minimum": 0},
+            "bitwise_equal": {"const": true}
+          }
+        },
+        "processMemorySample": {
+          "type": "object",
+          "required": ["private_usage_bytes", "working_set_bytes"],
+          "properties": {
+            "private_usage_bytes": {"type": "integer", "minimum": 0},
+            "working_set_bytes": {"type": "integer", "minimum": 0}
+          }
+        }
   },
   "additionalProperties": true
 }

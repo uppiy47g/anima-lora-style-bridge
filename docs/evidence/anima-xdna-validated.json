@@ -484,7 +484,7 @@
           "normalized_rms_error": 0.2554629743,
           "max_abs_error": 3.8654255867,
           "mean_abs_error": 0.1698338240,
-          "interpretation": "This compares the BF16+XDNA latent to the stock-FP32 CPU reference; the previous validated XDNA 8-step latent was not retained, so latent parity to the prior XDNA baseline is not established."
+          "interpretation": "This compares the BF16+XDNA latent to the stock-FP32 CPU reference; a later controlled BF16+XDNA rerun matched the prior BF16+XDNA latent bitwise."
         },
         "image_comparison_to_stock_fp32_cpu": {
           "psnr_db": 19.8550592547,
@@ -496,11 +496,114 @@
           "pixel_equal": true,
           "mae_8bit": 0.0
         },
-        "timing_note": "One BF16+XDNA run and one stock-FP32 CPU run on separate fresh standalone server launches. Timings are observations, not a controlled speed comparison or speedup claim."
+        "timing_note": "One BF16+XDNA run and one stock-FP32 CPU run on separate fresh standalone server launches. Timings are observations, not a controlled speed comparison or speedup claim.",
+        "paired_runtime_reverification": {
+          "status": "measured_sequential_sampler_pair",
+          "execution_topology": "Two sequential full samplers in one ComfyUI prompt and one attached runtime: an initial KSampler followed by KSamplerAdvanced using the same inputs and model.",
+          "paired_prompt_api_wall_seconds": 245.946,
+          "paired_prompt_comfy_execution_seconds": 244.598,
+          "sampler_node_execution_seconds": {
+            "first_KSampler": 120.737,
+            "resident_KSamplerAdvanced": 100.639
+          },
+          "runtime": {
+            "model_variant": "Turbo V1.1",
+            "source_fingerprint": "066b4281037504b1b7200ecd65b4182fc765ed882ecd5ca650db7308246a8dee",
+            "model_fingerprint": "066b4281037504b1b7200ecd65b4182fc765ed882ecd5ca650db7308246a8dee",
+            "fingerprints_match": true,
+            "block_parameter_dtype": "bfloat16",
+            "block_parameter_count": 560,
+            "block_parameter_bytes": 3875565568,
+            "block_parameters_released": false,
+            "calls": 16,
+            "chain_runs": 16,
+            "resident_reuses": 15,
+            "dispatches_per_chain": 532,
+            "last_chain_h2d_bytes": 4121427968,
+            "last_chain_host_visible_d2h_bytes": 8793358336,
+            "last_chain_weight_population_bytes": 0,
+            "last_chain_resident_hits": 644,
+            "last_error": null,
+            "unload_closed": true,
+            "reference_count_after_unload": 0
+          },
+          "latent_comparisons": {
+            "resident_vs_first": {
+              "max_abs": 0.0,
+              "mean_abs": 0.0,
+              "nrms": 0.0,
+              "bitwise_equal": true
+            },
+            "first_vs_previous_bf16_xdna": {
+              "max_abs": 0.0,
+              "mean_abs": 0.0,
+              "nrms": 0.0,
+              "bitwise_equal": true
+            }
+          },
+          "image": {
+            "first_vs_resident_pixel_equal": true,
+            "first_vs_previous_bf16_xdna_pixel_equal": true,
+            "first_vs_previous_qkv_path_pixel_equal": true,
+            "png_sha256": "1e962e2672e57964c6e5028ebee8a5d4fe87b4006800676ab3289259527b2204",
+            "png_size_bytes": 387989,
+            "dimensions": [512, 512],
+            "mode": "RGB",
+            "metadata_keys": ["prompt"],
+            "metadata_entries": 1
+          },
+          "process_memory": {
+            "methodology": "Windows GetProcessMemoryInfo PROCESS_MEMORY_COUNTERS_EX; current PrivateUsage and working set sampled approximately every 0.5 seconds across the paired prompt and unload/GC. XRT BO storage is separate and is not added to process commit. Peak counters are cumulative for the server process lifetime, which included earlier validation runs.",
+            "sample_count": 429,
+            "before_workflow": {
+              "private_usage_bytes": 2340446208,
+              "working_set_bytes": 444796928
+            },
+            "after_bf16_loader": {
+              "private_usage_bytes": 9422262272,
+              "working_set_bytes": 5145571328
+            },
+            "after_xdna_attach": {
+              "private_usage_bytes": 10627514368,
+              "working_set_bytes": 5152227328
+            },
+            "before_first_sampler": {
+              "private_usage_bytes": 10819514368,
+              "working_set_bytes": 6420963328
+            },
+            "after_first_sampler": {
+              "private_usage_bytes": 16855146496,
+              "working_set_bytes": 3520020480
+            },
+            "peak_sampled_during_pair": {
+              "private_usage_bytes": 17803005952,
+              "working_set_bytes": 10231619584
+            },
+            "after_explicit_xdna_unload": {
+              "private_usage_bytes": 11112161280,
+              "working_set_bytes": 765362176
+            },
+            "after_unload_gc": {
+              "private_usage_bytes": 2354520064,
+              "working_set_bytes": 448348160
+            },
+            "server_lifetime_peak_counters": {
+              "peak_private_commit_bytes": 19189141504,
+              "peak_working_set_bytes": 10489434112,
+              "scope_note": "Cumulative across earlier work in the same server process; the sampled paired-run peak is reported separately."
+            }
+          },
+          "xrt_bo_accounting": {
+            "last_resident_weight_population_bytes": 0,
+            "cache_packed_payload_bytes": 3963645952,
+            "note": "Packed-cache size is not an XRT BO measurement. Prior controlled cold-attach evidence records 3963617280 weight-BO bytes; no BO bytes are added to the process PrivateUsage totals."
+          },
+          "timing_note": "The two sampler durations are node timings inside a single paired prompt, not separate standalone workflow measurements or a controlled comparison against the stock FP32 loader. The overall prompt wall and ComfyUI execution durations include both samplers and the other workflow nodes."
+        }
       },
       "xrt_bo_accounting": "XRT BO weight_population_bytes and process commit counters are separate observations. Do not add BO bytes to CPU Parameter bytes because XRT allocations may be unified/shared with host memory.",
       "end_to_end_dtype_validation": "passed_image_gate_with_latent_cpu_difference",
-      "dtype_quality_limit": "The BF16 Turbo 8-step decoded image is pixel-identical to the previous validated XDNA output, and its FP32 CPU reference run reproduces the previous CPU reference image. Its latent differs from the stock-FP32 CPU latent by 25.55% normalized RMS; no previous XDNA latent was retained for a direct latent-parity check. No timing speedup is claimed."
+      "dtype_quality_limit": "The BF16 Turbo 8-step decoded image is pixel-identical to the previous validated XDNA and QKV-path outputs; a later paired BF16+XDNA run also matched the previous BF16+XDNA latent bitwise. The BF16+XDNA latent differs from the stock-FP32 CPU latent by 25.55% normalized RMS. The paired sampler timings are not a comparison against the stock loader, so no speedup claim is made."
     },
     "user_observation_20_step": {
       "status": "observational_non_controlled",

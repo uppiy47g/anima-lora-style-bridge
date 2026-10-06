@@ -212,9 +212,44 @@ reference the image has PSNR 19.8551 dB, SSIM 0.824799, and 8-bit MAE 10.8841,
 the same previously reported quality tradeoff. The BF16+XDNA latent compared
 to the stock-FP32 CPU latent has normalized RMS error 0.255463, maximum
 absolute error 3.86543, and mean absolute error 0.169834. The previous XDNA
-latent was not retained, so direct BF16-vs-previous-XDNA latent parity is
-unverified; the established gate here is decoded-image parity to that
-validated XDNA output, not FP32 CPU latent equality.
+latent differs from the stock-FP32 CPU latent; this CPU comparison remains a
+quality limitation.
+
+A later controlled BF16+XDNA re-verification used two sequential full samplers
+in one ComfyUI prompt and one attached Turbo runtime: the first `KSampler`
+took 120.737 s, and the resident `KSamplerAdvanced` took 100.639 s. The paired
+prompt took 245.946 s API wall / 244.598 s Comfy execution; those totals
+include both samplers and must not be interpreted as separate workflow times.
+The runtime reported matching source/MODEL fingerprint
+`066b4281037504b1b7200ecd65b4182fc765ed882ecd5ca650db7308246a8dee`, 560
+BF16 block Parameters (3,875,565,568 bytes), 532 dispatches per chain, 16
+chain runs, and 15 resident reuses. Its final resident call populated zero
+weight bytes. Explicit unload closed the runtime and reduced the reference
+count to zero.
+
+Both decoded 512×512 RGB images were pixel-identical to one another, the
+previous BF16+XDNA image, and the validated QKV-path image. The PNG SHA-256 is
+`1e962e2672e57964c6e5028ebee8a5d4fe87b4006800676ab3289259527b2204`;
+it is 387,989 bytes with one `prompt` metadata entry. The two latent tensors
+were bitwise identical, and the first matched the previous BF16+XDNA latent
+bitwise (max/mean absolute difference and normalized RMS are all zero). This
+does not replace the FP32 CPU latent comparison above.
+
+For this paired run, Windows `GetProcessMemoryInfo` sampled `PrivateUsage`
+(private commit) and working set about every 0.5 s. Private commit was
+2,340,446,208 bytes before the workflow, 9,422,262,272 after the BF16 loader,
+10,627,514,368 after XDNA attach, and 10,819,514,368 before the first sampler.
+The sampled maximum during the pair was 17,803,005,952 bytes private commit
+and 10,231,619,584 bytes working set. After explicit runtime unload it was
+11,112,161,280 bytes; after model unload/GC it returned to 2,354,520,064
+bytes private commit and 448,348,160 bytes working set. The Windows peak
+counters (19,189,141,504 bytes private commit / 10,489,434,112 bytes working
+set) are cumulative over the server process lifetime, which included earlier
+validation runs; the separately sampled pair maximum is the run-scoped
+measurement. XRT BO storage is not included in these host counters. The last
+resident-call status reported zero weight population; the verified packed
+cache payload is 3,963,645,952 bytes, distinct from the previously measured
+3,963,617,280-byte cold XRT weight-BO population.
 
 This establishes a material CPU-model memory reduction without deleting or
 replacing shared ModelPatcher Parameters. It does not demonstrate a runtime
