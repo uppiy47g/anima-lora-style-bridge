@@ -44,8 +44,9 @@
       "dispatches_after": 23,
       "h2d_bytes_before": 612237312,
       "h2d_bytes_after": 156631040,
-      "d2h_bytes_before": 314048512,
-      "d2h_bytes_after": 0,
+      "d2h_visible_output_bytes_before": 314048512,
+      "d2h_separate_staging_buffer_bytes_after": 0,
+      "d2h_visible_output_bytes_after": 314048512,
       "representative_wall_ms": 252.4
     },
     "chain_28": {
@@ -132,6 +133,91 @@
         "image_ssim": 0.824799478,
         "image_mae_8bit": 10.884127298990885,
         "settings_provenance": "Locally validated V1.1 setting; local V1.1 metadata had no official recommendation."
+      }
+    },
+    "optimization_phase_profile": {
+      "status": "measured_profile_and_block_validation",
+      "recorded_date": "2026-10-06",
+      "input": "Deterministic synthetic block-0 inputs; batch 1, 1024 image tokens, 512 context tokens",
+      "profile_semantics": {
+        "d2h_bytes": "Bytes in the XRT output BO synchronized for host visibility; no additional staging-buffer copy is implied.",
+        "npu_chain_timing": "NPUChain output synchronization is included in kernel_and_wait_ms because its API does not expose a separate D2H synchronization timer.",
+        "chain_totals": "28-block and eight-step totals below are arithmetic projections from the measured one-block profile, not independent end-to-end measurements."
+      },
+      "base_v1_0": {
+        "steady_block_wall_ms": 334.4716,
+        "cpu_oracle_block_ms": 1012.6753,
+        "host_stages_ms": 60.7095,
+        "npu_stages_ms": 269.62,
+        "kernel_and_wait_ms": 178.1319,
+        "host_copy_ms": 2.8742,
+        "cache_sync_ms": 3.4547,
+        "dispatches": 23,
+        "resident_hits": 23,
+        "allocations": 0,
+        "weight_population_bytes": 0,
+        "h2d_bytes": 156631040,
+        "d2h_bytes": 314048512,
+        "max_abs_error": 0.0009765625,
+        "normalized_rms_error": 0.002510003525971698
+      },
+      "turbo_v1_1": {
+        "steady_block_wall_ms": 342.3699,
+        "cpu_oracle_block_ms": 975.2405,
+        "host_stages_ms": 68.7125,
+        "npu_stages_ms": 268.66,
+        "kernel_and_wait_ms": 175.2777,
+        "host_copy_ms": 2.492,
+        "cache_sync_ms": 3.0048,
+        "dispatches": 23,
+        "resident_hits": 23,
+        "allocations": 0,
+        "weight_population_bytes": 0,
+        "h2d_bytes": 156631040,
+        "d2h_bytes": 314048512,
+        "max_abs_error": 0.0009765625,
+        "normalized_rms_error": 0.0025190570889108404
+      },
+      "chain_28_projection": {
+        "status": "derived_from_steady_block_profile",
+        "dispatches": 644,
+        "h2d_bytes": 4385669120,
+        "d2h_bytes": 8793358336
+      },
+      "turbo_8_step_projection": {
+        "status": "derived_not_run",
+        "dispatches": 5152,
+        "h2d_bytes": 35085352960,
+        "d2h_bytes": 70346866688
+      },
+      "comparison_with_historical_accounting": {
+        "dispatches_per_block_before": 23,
+        "dispatches_per_block_after": 23,
+        "h2d_bytes_per_block_before": 156631040,
+        "h2d_bytes_per_block_after": 156631040,
+        "d2h_bytes_per_block_previously_reported": 0,
+        "d2h_bytes_per_block_corrected": 314048512,
+        "performance_change_claimed": false
+      },
+      "attention_scale_fusion_trial": {
+        "status": "rejected_and_removed",
+        "blocker": "AIR compilation failed with iterator_interchange length 4 for a 2-loop operation when a scalar epilogue was added after the head matmul, both with and without an explicit BF16 cast.",
+        "host_stage_retained": "attention scaling",
+        "silent_fallback": false
+      },
+      "turbo_end_to_end": {
+        "previous_validated_seconds": 136.47,
+        "rerun_status": "not_run",
+        "reason": "The isolated ComfyUI server was not running during this phase; no new full workflow result or speedup is claimed."
+      },
+      "synthetic_base_chain_followup": {
+        "status": "gate_failed_not_used_as_validation",
+        "seed": 0,
+        "max_block_gate": 0.05,
+        "worst_block": 26,
+        "worst_block_normalized_rms_error": 0.0576229,
+        "max_abs_error": 73.25,
+        "reason": "The synthetic input is not the captured model-preprocessing fixture used for the validated Base chain."
       }
     },
     "user_observation_20_step": {

@@ -163,6 +163,14 @@ class ComfyUIXDNAWrapperTests(unittest.TestCase):
         self.assertIsInstance(model, FakePatcher)
         self.assertIn("not attached", status)
 
+    def test_runtime_snapshot_names_host_visible_output_bytes(self):
+        with TemporaryDirectory() as directory:
+            runtime = SharedRuntime(Path(directory) / "checkpoint.safetensors")
+            self.assertEqual(
+                runtime.snapshot()["last_d2h_host_visible_bytes"],
+                0,
+            )
+
     def test_rejects_non_anima_model(self):
         patcher = FakePatcher()
         patcher.model.diffusion_model = object()

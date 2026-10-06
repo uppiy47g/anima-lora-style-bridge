@@ -53,11 +53,15 @@ The resident session owns the XRT device, ELF objects, hardware contexts,
 kernels, and mapped `ext.bo` buffers. Static weight BOs are populated once and
 reused across blocks/runs; dynamic input and output BOs are reused by shape.
 Outputs remain mapped rather than being copied to a separate host tensor, so
-the steady path has zero explicit D2H staging copies. Cache synchronization is
-measured separately. After population, checkpoint tensors are replaced by
-shape/dtype metadata (except the small Q/K RMSNorm vectors), avoiding a second
-approximately 4 GB host copy while the resident BOs are live. The safetensors
-checkpoint always remains the source of truth.
+the steady path has zero *additional staging-buffer* D2H copies. Each output
+BO is still synchronized for host access; the profiler now counts those
+device-to-host-visible bytes instead of reporting zero. Cache synchronization
+time is reported separately for ordinary Linear dispatches; the head-chain
+API combines its launch and output synchronization time. After population,
+checkpoint tensors are replaced by shape/dtype metadata (except the small Q/K
+RMSNorm vectors), avoiding a second approximately 4 GB host copy while the
+resident BOs are live. The safetensors checkpoint always remains the source
+of truth.
 
 SiLU, LayerNorm/AdaLN modulation, Q/K RMSNorm, RoPE, scale/mask/softmax, exact
 GELU, tensor reshapes, gates, and residual additions remain explicit PyTorch
@@ -147,8 +151,27 @@ On the validated Ryzen AI 9 365 / NPU Strix system, Anima Base block 0 at
 |---|---:|---:|
 | XRT dispatches/block | 83 | 23 |
 | H2D staging/block | 612,237,312 B | 156,631,040 B |
-| D2H staging/block | 314,048,512 B | 0 B |
+| Device-to-host-visible output/block | 314,048,512 B | 314,048,512 B |
 | cached wall/block | about 2.086 s | 0.236-0.362 s |
+
+The historical resident D2H value was recorded as `0 B` because no separate
+staging tensor was used; it did not mean the host could read output without an
+XRT BO synchronization. The corrected counter reports 314,048,512 output
+bytes per block while the number of separate D2H staging-buffer copies remains
+zero. Current `anima-xdna-chain --profile` output counts these bytes as
+`d2h_staging_bytes` for compatibility with the JSON profile field name.
+
+On 2026-10-06, one warm resident block-0 run using deterministic synthetic
+inputs measured Base at 334.47 ms wall (60.71 ms host stages, 269.62 ms NPU
+stages) and Turbo at 342.37 ms (68.71 ms host, 268.66 ms NPU). Both used 23
+dispatches, 156,631,040 H2D bytes, and 314,048,512 synchronized output bytes;
+normalized RMS against each CPU block oracle was 0.0025100 (Base) and
+0.0025191 (Turbo). These are single-block observations, not captured-chain or
+end-to-end benchmarks. A trial that fused QK attention scaling into the
+stitched Triton kernel was reverted: the validated AIR pipeline failed
+compilation with `iterator_interchange` length 4 for a 2-loop operation. The
+scale and softmax therefore remain on CPU, and this phase claims no generation
+speedup.
 
 One representative steady optimized block measured 252.4 ms wall, including
 111.2 ms XRT kernel/wait, 35.7 ms explicit host operations, 2.5 ms mapped-BO
@@ -167,7 +190,7 @@ The full 28-block resident chain measured:
 - cached steady wall times of 7.02, 7.03, and 7.15 s;
 - approximately 0.25 s median per block;
 - 23.19 s for the CPU oracle (about 3.3x slower);
-- 4,385,669,120 B of H2D staging and zero explicit D2H staging;
+- 4,385,669,120 B H2D and 8,793,358,336 B of device-to-host-visible output;
 - about 3.22 s total XRT kernel/wait, 73-75 ms host copy, and 86-89 ms cache
   synchronization;
 - final normalized RMS error `0.007466678`;

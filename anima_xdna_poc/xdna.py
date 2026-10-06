@@ -344,7 +344,7 @@ class XDNASession:
             elapsed,
             None,
             prepared_input.numel() * 2 + prepared_weight.numel() * 2,
-            0,
+            output.nbytes,
             0,
             True,
             kernel_sync_ms=elapsed,
@@ -451,7 +451,7 @@ class _ResidentKernelRunner:
         ).reshape(template.shape)
         return output, {
             "h2d_bytes": h2d_bytes,
-            "d2h_bytes": 0,
+            "d2h_bytes": sizes[output_index],
             "allocation_count": allocation_count,
             "resident_hit": not first_weight,
             "allocation_ms": allocation_ms,

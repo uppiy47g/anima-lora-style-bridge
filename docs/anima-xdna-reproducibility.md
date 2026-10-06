@@ -214,6 +214,55 @@ Likewise, a low Task Manager NPU percentage is not an AIE utilization
 measurement: short dispatches, synchronization, and substantial host work can
 leave gaps in that UI graph.
 
+## Optimization follow-up: measured boundary accounting
+
+The resident profiler reports stage wall time, XRT dispatches, H2D bytes,
+device-to-host-visible output bytes, BO allocations/hits, host copies,
+synchronization, and kernel/wait time. Earlier evidence counted no separate
+D2H staging-buffer copy and consequently reported zero D2H bytes. That was
+ambiguous: every GEMM output is synchronized from its BO before CPU-side
+stages consume it. The new `d2h_host_visible_bytes` counter counts those
+output bytes; it does not imply a second staging allocation. The older
+`d2h_staging_bytes` name remains as a compatibility alias. Ordinary Linear
+D2H sync time is separate. The Triton-XDNA `NPUChain` interface does not
+expose separate output-sync timing, so its output bytes are counted while its
+sync remains included in `kernel_and_wait_ms`.
+
+Warm block-0 profiles on 2026-10-06 used deterministic synthetic inputs and
+the exact Base and Turbo checkpoints. Base measured 334.47 ms wall, 60.71 ms
+host stages, 269.62 ms NPU stages, 156,631,040 H2D bytes, and 314,048,512
+device-to-host-visible bytes. Turbo measured 342.37 ms, 68.71 ms host,
+268.66 ms NPU, and the same transfers. Both reported 23 dispatches, zero
+allocations, 23 resident hits, and zero weight population on the measured run.
+Their one-block normalized RMS errors against the CPU oracle were 0.0025100
+and 0.0025191, respectively.
+
+For a 28-block batch-1 chain, the measured per-block traffic projects to
+644 dispatches, 4,385,669,120 H2D bytes, and 8,793,358,336
+device-to-host-visible bytes. The eight-step figures are projections from
+that block profile (5,152 dispatches, 35,085,352,960 H2D bytes, and
+70,346,866,688 output bytes), not a new ComfyUI workflow measurement. The
+ComfyUI server was not running during this phase, so the validated 136.47 s
+Turbo workflow baseline was not rerun and no end-to-end speedup is claimed.
+
+The first candidate fusion, applying attention scale in the final head
+matmul, was tested on the validated toolchain and rejected. Adding a scalar
+epilogue caused AIR compilation to fail with `iterator_interchange` length 4
+for an operation with 2 loops, both with and without an explicit BF16 cast.
+The experimental path was removed. Attention scaling, normalization, RoPE,
+softmax, GELU, and residual operations remain on CPU; dispatch count and
+numerical behavior are unchanged. The next useful kernel experiment requires
+an AIR-supported attention epilogue or a correctness-validated resident
+attention pipeline, rather than forcing this unsupported lowering.
+
+| Stage or gate | Status in this phase | Evidence / limitation |
+|---|---|---|
+| AdaLN/LayerNorm, RMSNorm, RoPE, mask/softmax, GELU, gates/residuals | CPU unchanged | No candidate migration passed a compiler and oracle gate in this phase. |
+| Attention-scale epilogue | Not supported on current toolchain | AIR `iterator_interchange` lowering failure; trial removed, no fallback path added. |
+| Block-to-block NPU activation residency | Not implemented | Host normalization/attention stages still consume visible tensors between GEMMs. |
+| Dispatch reduction | No change | 23 per block / 644 per 28-block chain. |
+| Turbo 8-step generation | Not rerun | Standalone ComfyUI service was unavailable; no new end-to-end timing or image comparison. |
+
 ## Public verification ladder
 
 Set placeholders only in the current shell; do not commit paths or captures.

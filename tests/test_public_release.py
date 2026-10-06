@@ -55,6 +55,35 @@ class PublicReleaseTests(unittest.TestCase):
             turbo["chain_28"]["final_normalized_rms_error"],
             turbo["chain_28"]["final_gate"],
         )
+        profile = evidence["measurements"]["optimization_phase_profile"]
+        self.assertEqual(profile["status"], "measured_profile_and_block_validation")
+        self.assertFalse(
+            profile["comparison_with_historical_accounting"]["performance_change_claimed"]
+        )
+        self.assertEqual(profile["base_v1_0"]["dispatches"], 23)
+        self.assertEqual(profile["turbo_v1_1"]["dispatches"], 23)
+        self.assertEqual(
+            profile["base_v1_0"]["d2h_bytes"],
+            profile["comparison_with_historical_accounting"][
+                "d2h_bytes_per_block_corrected"
+            ],
+        )
+        self.assertEqual(
+            profile["chain_28_projection"]["d2h_bytes"],
+            profile["base_v1_0"]["d2h_bytes"] * 28,
+        )
+        self.assertEqual(
+            profile["turbo_8_step_projection"]["dispatches"],
+            profile["turbo_v1_1"]["dispatches"] * 28 * 8,
+        )
+        self.assertEqual(
+            profile["attention_scale_fusion_trial"]["status"],
+            "rejected_and_removed",
+        )
+        self.assertEqual(
+            profile["synthetic_base_chain_followup"]["status"],
+            "gate_failed_not_used_as_validation",
+        )
         for artifact in evidence["artifacts"]:
             path = ROOT / artifact["path"]
             payload, width, height, color_type, metadata_entries = read_png(path)

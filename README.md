@@ -17,6 +17,13 @@ projection, and VAE remain on the CPU. Incidental display-GPU activity is not
 model acceleration. Task Manager's NPU percentage is also not a direct AIE
 utilization counter.
 
+The 2026-10-06 profiling follow-up corrected resident output-transfer
+accounting: mapped XRT outputs still synchronize for host visibility, even
+though no separate D2H staging buffer is allocated. A candidate attention
+scale epilogue could not compile reliably with the validated AIR toolchain and
+was removed; this phase makes no end-to-end speedup claim. See the
+[measurement and limitation record](docs/anima-xdna-reproducibility.md#optimization-follow-up-measured-boundary-accounting).
+
 Public verification resources:
 
 - [Reproducibility and technical report](docs/anima-xdna-reproducibility.md)

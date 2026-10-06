@@ -81,6 +81,9 @@ On Ryzen AI 9 365 / Strix XDNA 2 (`npu2`), XRT 2.21.75 and Triton-XDNA
   process-local weight BO population
 - second resident wrapper call: 7.73 s total / 7.57 s chain, 644 dispatches,
   644 resident hits, zero weight population bytes and no recompile
+- resident profiles count output bytes synchronized from XRT BOs to host
+  visibility in `last_d2h_host_visible_bytes`; these are not additional
+  staging-buffer allocations
 - real Qwen prompt, CFG 3.5, one denoising step: normalized RMS 0.04068
   (the two CFG branches execute sequentially on the single-tenant NPU)
 - decoded 512x512 images: PSNR 36.33 dB, SSIM 0.8458

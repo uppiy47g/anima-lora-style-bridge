@@ -9,7 +9,33 @@
     "source_commits": {"type": "object"},
     "tested_system": {"type": "object"},
     "boundary": {"type": "object"},
-    "measurements": {"type": "object"},
+    "measurements": {
+      "type": "object",
+      "properties": {
+        "optimization_phase_profile": {
+          "type": "object",
+          "required": [
+            "status",
+            "profile_semantics",
+            "base_v1_0",
+            "turbo_v1_1",
+            "chain_28_projection",
+            "turbo_8_step_projection",
+            "comparison_with_historical_accounting",
+            "attention_scale_fusion_trial",
+            "turbo_end_to_end",
+            "synthetic_base_chain_followup"
+          ],
+          "properties": {
+            "status": {"const": "measured_profile_and_block_validation"},
+            "base_v1_0": {"$ref": "#/$defs/residentBlockProfile"},
+            "turbo_v1_1": {"$ref": "#/$defs/residentBlockProfile"},
+            "chain_28_projection": {"$ref": "#/$defs/transferProjection"},
+            "turbo_8_step_projection": {"$ref": "#/$defs/transferProjection"}
+          }
+        }
+      }
+    },
     "artifacts": {
       "type": "array",
       "items": {
@@ -23,6 +49,47 @@
           "height": {"const": 512},
           "metadata_entries": {"const": 0}
         }
+      }
+    }
+  },
+  "$defs": {
+    "residentBlockProfile": {
+      "type": "object",
+      "required": [
+        "steady_block_wall_ms",
+        "dispatches",
+        "resident_hits",
+        "allocations",
+        "h2d_bytes",
+        "d2h_bytes",
+        "max_abs_error",
+        "normalized_rms_error"
+      ],
+      "properties": {
+        "steady_block_wall_ms": {"type": "number", "minimum": 0},
+        "dispatches": {"const": 23},
+        "resident_hits": {"const": 23},
+        "allocations": {"const": 0},
+        "h2d_bytes": {"type": "integer", "minimum": 0},
+        "d2h_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Output bytes synchronized from the device BO for host visibility."
+        },
+        "max_abs_error": {"type": "number", "minimum": 0},
+        "normalized_rms_error": {"type": "number", "minimum": 0}
+      }
+    },
+    "transferProjection": {
+      "type": "object",
+      "required": ["status", "dispatches", "h2d_bytes", "d2h_bytes"],
+      "properties": {
+        "status": {
+          "enum": ["derived_from_steady_block_profile", "derived_not_run"]
+        },
+        "dispatches": {"type": "integer", "minimum": 1},
+        "h2d_bytes": {"type": "integer", "minimum": 0},
+        "d2h_bytes": {"type": "integer", "minimum": 0}
       }
     }
   },

@@ -419,6 +419,68 @@ class PackedWeightCacheTests(unittest.TestCase):
 
 
 class XDNAPocUnitTests(unittest.TestCase):
+    def test_resident_profile_counts_synced_output_bytes(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        from anima_xdna_poc.xdna import _ResidentKernelRunner
+
+        class Buffer:
+            def __init__(self, size):
+                self.storage = bytearray(size)
+
+            def map(self):
+                return self.storage
+
+            def sync(self, _direction):
+                pass
+
+        class Run:
+            def set_arg(self, _index, _buffer):
+                pass
+
+            def start(self):
+                pass
+
+            def wait2(self):
+                pass
+
+        class Extension:
+            @staticmethod
+            def bo(_device, size):
+                return Buffer(size)
+
+        xrt = SimpleNamespace(
+            ext=Extension(),
+            run=lambda _kernel: Run(),
+            xclBOSyncDirection=SimpleNamespace(
+                XCL_BO_SYNC_BO_TO_DEVICE=1,
+                XCL_BO_SYNC_BO_FROM_DEVICE=2,
+            ),
+        )
+        runner = _ResidentKernelRunner.__new__(_ResidentKernelRunner)
+        runner.xrt = xrt
+        runner.device = object()
+        runner.kernel = object()
+        runner.dynamic_bos = None
+        runner.weight_bos = {}
+
+        arrays = [
+            np.zeros(4, dtype=np.float32),
+            np.zeros(8, dtype=np.float32),
+            np.empty(6, dtype=np.float32),
+        ]
+        _output, profile = runner.run(
+            arrays,
+            "weight",
+            static_indices={1},
+            scratch_indices={2},
+            output_index=2,
+        )
+
+        self.assertEqual(profile["h2d_bytes"], arrays[0].nbytes + arrays[1].nbytes)
+        self.assertEqual(profile["d2h_bytes"], arrays[2].nbytes)
+
     def test_selects_canonical_key_before_suffix_fallback(self):
         canonical = "diffusion_model.blocks.0.self_attn.q_proj.weight"
         selected = select_weight_key(

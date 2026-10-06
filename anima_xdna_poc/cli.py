@@ -506,6 +506,9 @@ def chain_main(argv: list[str] | None = None) -> int:
         "profile": {
             "h2d_staging_bytes": sum(metric.h2d_bytes for metric in metrics),
             "d2h_staging_bytes": sum(metric.d2h_bytes for metric in metrics),
+            "d2h_host_visible_bytes": sum(
+                metric.d2h_bytes for metric in metrics
+            ),
             "allocations": sum(metric.allocation_count for metric in metrics),
             "resident_hits": sum(metric.resident_hits for metric in metrics),
             "host_copy_ms": sum(metric.host_copy_ms for metric in metrics),
@@ -529,6 +532,9 @@ def chain_main(argv: list[str] | None = None) -> int:
         "populate_profile": {
             "h2d_staging_bytes": sum(
                 metric.h2d_bytes for metric in populate_metrics
+            ),
+            "d2h_host_visible_bytes": sum(
+                metric.d2h_bytes for metric in populate_metrics
             ),
             "weight_population_ms": sum(
                 metric.weight_population_ms for metric in populate_metrics

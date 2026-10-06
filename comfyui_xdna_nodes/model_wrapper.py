@@ -171,6 +171,9 @@ class SharedRuntime:
                     "runtime_open": (
                         self._runtime is not None and self._runtime.is_open
                     ),
+                    "last_d2h_host_visible_bytes": (
+                        self.diagnostics.last_d2h_bytes
+                    ),
                     "supported_shape": list(SUPPORTED_SHAPE),
                     "replacement_boundary": (
                         "after ComfyUI patch/time/Qwen/RoPE preprocessing; "
