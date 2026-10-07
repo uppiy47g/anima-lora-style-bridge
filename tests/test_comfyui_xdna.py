@@ -166,7 +166,23 @@ class ComfyUIXDNAWrapperTests(unittest.TestCase):
                     str(checkpoint), False, qkv_chaining=False
                 ),
             )
-            checkpoint.write_bytes(b"other")
+            self.assertNotEqual(
+                initial,
+                LoadAttachAnimaXDNAModel.IS_CHANGED(
+                    str(checkpoint), False, cache_dir=temporary
+                ),
+            )
+            self.assertEqual(
+                LoadAttachAnimaXDNAModel.IS_CHANGED(
+                    str(checkpoint), False, cache_dir=temporary
+                ),
+                LoadAttachAnimaXDNAModel.IS_CHANGED(
+                    str(checkpoint),
+                    False,
+                    cache_dir=str(Path(temporary, ".")),
+                ),
+            )
+            checkpoint.write_bytes(b"replacement")
             self.assertNotEqual(
                 initial,
                 LoadAttachAnimaXDNAModel.IS_CHANGED(str(checkpoint), False),
@@ -186,7 +202,7 @@ class ComfyUIXDNAWrapperTests(unittest.TestCase):
                     initial,
                     LoadAnimaBF16.IS_CHANGED("model.safetensors"),
                 )
-                checkpoint.write_bytes(b"other")
+                checkpoint.write_bytes(b"replacement")
                 self.assertNotEqual(
                     initial,
                     LoadAnimaBF16.IS_CHANGED("model.safetensors"),

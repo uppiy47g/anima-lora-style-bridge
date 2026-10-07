@@ -78,8 +78,14 @@ starting ComfyUI. The packed cache defaults to
 launches within each attention module; LayerNorm/AdaLN, RMSNorm, RoPE,
 scale/mask/softmax, GELU, gates, and residual operations remain on CPU.
 
-`rebuild_cache` explicitly recreates the packed cache. `cache_dir` may point
-to another user-writable ASCII path. It must not point into the model folder.
+`rebuild_cache` explicitly recreates the packed cache when the attach node
+executes. ComfyUI caches the node result for unchanged inputs, so changing this
+input from `false` to `true` forces one rebuild; repeated prompts with the same
+`true` value reuse that attached result. Toggle it back before requesting a
+later rebuild. Checkpoint file identity and attach options are part of the
+cache key, while the MODEL dependency is tracked by ComfyUI. `cache_dir` may
+point to another user-writable ASCII path. It must not point into the model
+folder.
 
 The attach status reports block Parameter logical/unique-storage bytes and
 dtype counts after source identity matches. It warns when CPU block Parameters
