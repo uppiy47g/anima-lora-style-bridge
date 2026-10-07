@@ -136,6 +136,62 @@ class ComfyUIXDNAWrapperTests(unittest.TestCase):
             self.assertIsInstance(attachment, RuntimeAttachment)
             attachment.cleanup()
 
+    def test_attach_cache_identity_is_stable_until_checkpoint_or_options_change(self):
+        with TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary, "model.safetensors")
+            checkpoint.write_bytes(b"first")
+            initial = LoadAttachAnimaXDNAModel.IS_CHANGED(
+                str(checkpoint), False
+            )
+            self.assertEqual(
+                initial,
+                LoadAttachAnimaXDNAModel.IS_CHANGED(str(checkpoint), False),
+            )
+            self.assertNotEqual(
+                initial,
+                LoadAttachAnimaXDNAModel.IS_CHANGED(str(checkpoint), True),
+            )
+            rebuilt = LoadAttachAnimaXDNAModel.IS_CHANGED(
+                str(checkpoint), True
+            )
+            self.assertEqual(
+                rebuilt,
+                LoadAttachAnimaXDNAModel.IS_CHANGED(
+                    str(checkpoint), True
+                ),
+            )
+            self.assertNotEqual(
+                initial,
+                LoadAttachAnimaXDNAModel.IS_CHANGED(
+                    str(checkpoint), False, qkv_chaining=False
+                ),
+            )
+            checkpoint.write_bytes(b"other")
+            self.assertNotEqual(
+                initial,
+                LoadAttachAnimaXDNAModel.IS_CHANGED(str(checkpoint), False),
+            )
+
+    def test_bf16_loader_cache_identity_tracks_checkpoint_file(self):
+        with TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary, "model.safetensors")
+            checkpoint.write_bytes(b"first")
+            folder_paths = types.ModuleType("folder_paths")
+            folder_paths.get_full_path_or_raise = mock.Mock(
+                return_value=str(checkpoint)
+            )
+            with mock.patch.dict("sys.modules", {"folder_paths": folder_paths}):
+                initial = LoadAnimaBF16.IS_CHANGED("model.safetensors")
+                self.assertEqual(
+                    initial,
+                    LoadAnimaBF16.IS_CHANGED("model.safetensors"),
+                )
+                checkpoint.write_bytes(b"other")
+                self.assertNotEqual(
+                    initial,
+                    LoadAnimaBF16.IS_CHANGED("model.safetensors"),
+                )
+
     def test_identity_mismatch_closes_before_runtime_open(self):
         runtime = SharedRuntime(Path("fixture.safetensors"))
         chain = mock.Mock()

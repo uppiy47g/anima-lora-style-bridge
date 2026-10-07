@@ -558,6 +558,24 @@ def _model_storage_profile(diffusion_model) -> dict[str, Any]:
     }
 
 
+def _file_identity_token(path: Path) -> str:
+    resolved = path.expanduser().resolve(strict=False)
+    try:
+        stat = resolved.stat()
+    except FileNotFoundError:
+        identity = {"path": str(resolved), "missing": True}
+    else:
+        identity = {
+            "path": str(resolved),
+            "device": stat.st_dev,
+            "file_id": stat.st_ino,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+        }
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
+
+
 class LoadAnimaBF16:
     @classmethod
     def INPUT_TYPES(cls):
@@ -574,6 +592,13 @@ class LoadAnimaBF16:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
     CATEGORY = "Anima XDNA 2"
+
+    @classmethod
+    def IS_CHANGED(cls, unet_name):
+        import folder_paths
+
+        path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+        return _file_identity_token(Path(path))
 
     def load(self, unet_name):
         import comfy.sd
@@ -626,8 +651,23 @@ class LoadAttachAnimaXDNAModel:
     CATEGORY = "Anima XDNA 2"
 
     @classmethod
-    def IS_CHANGED(cls, **_kwargs):
-        return time.time_ns()
+    def IS_CHANGED(
+        cls,
+        checkpoint,
+        rebuild_cache,
+        cache_dir="",
+        qkv_chaining=True,
+        **_kwargs,
+    ):
+        identity = {
+            "checkpoint": _file_identity_token(Path(checkpoint)),
+            "rebuild_cache": bool(rebuild_cache),
+            "cache_dir": str(Path(cache_dir).expanduser().resolve(strict=False))
+            if cache_dir.strip()
+            else None,
+            "qkv_chaining": bool(qkv_chaining),
+        }
+        return json.dumps(identity, sort_keys=True, separators=(",", ":"))
 
     def attach(
         self, model, checkpoint, rebuild_cache, cache_dir="", qkv_chaining=True
