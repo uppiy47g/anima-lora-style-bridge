@@ -79,6 +79,9 @@
             },
             "dtype_quality_limit": {"type": "string", "minLength": 1}
           }
+        },
+        "user_observed_xdna_resident_prompt_baseline": {
+          "$ref": "#/$defs/userObservedResidentPromptBaseline"
         }
       }
     },
@@ -642,6 +645,103 @@
           "properties": {
             "private_usage_bytes": {"type": "integer", "minimum": 0},
             "working_set_bytes": {"type": "integer", "minimum": 0}
+          }
+        },
+        "userObservedResidentPromptBaseline": {
+          "type": "object",
+          "required": [
+            "status",
+            "recorded_date",
+            "fix_commit",
+            "configuration",
+            "cold_prompt",
+            "unchanged_resident_prompts",
+            "prior_cpu_only_user_reported_total_seconds_range",
+            "console_observations",
+            "benchmark",
+            "caveat"
+          ],
+          "properties": {
+            "status": {"const": "user_observed_comfyui_console"},
+            "recorded_date": {"type": "string", "format": "date"},
+            "fix_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "configuration": {
+              "type": "object",
+              "required": ["model", "model_dtype", "execution", "width", "height", "steps"],
+              "properties": {
+                "model": {"const": "Anima Turbo V1.1"},
+                "model_dtype": {"const": "bfloat16"},
+                "execution": {"const": "XDNA attached"},
+                "width": {"const": 512},
+                "height": {"const": 512},
+                "steps": {"const": 4}
+              }
+            },
+            "cold_prompt": {
+              "type": "object",
+              "required": ["total_seconds", "sampler_progress_elapsed", "sampler_seconds_per_iteration"],
+              "properties": {
+                "total_seconds": {"type": "number", "minimum": 0},
+                "sampler_progress_elapsed": {"type": "string"},
+                "sampler_seconds_per_iteration": {"type": "number", "minimum": 0}
+              }
+            },
+            "unchanged_resident_prompts": {
+              "type": "object",
+              "required": [
+                "total_seconds",
+                "sampler_seconds_per_iteration",
+                "sampler_progress_elapsed",
+                "total_seconds_mean",
+                "total_seconds_min",
+                "total_seconds_max",
+                "sampler_seconds_per_iteration_mean",
+                "sampler_seconds_per_iteration_min",
+                "sampler_seconds_per_iteration_max"
+              ],
+              "properties": {
+                "total_seconds": {
+                  "type": "array",
+                  "items": {"type": "number", "minimum": 0},
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                "sampler_seconds_per_iteration": {
+                  "type": "array",
+                  "items": {"type": "number", "minimum": 0},
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                "sampler_progress_elapsed": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                "total_seconds_mean": {"type": "number", "minimum": 0},
+                "total_seconds_min": {"type": "number", "minimum": 0},
+                "total_seconds_max": {"type": "number", "minimum": 0},
+                "sampler_seconds_per_iteration_mean": {"type": "number", "minimum": 0},
+                "sampler_seconds_per_iteration_min": {"type": "number", "minimum": 0},
+                "sampler_seconds_per_iteration_max": {"type": "number", "minimum": 0}
+              }
+            },
+            "prior_cpu_only_user_reported_total_seconds_range": {
+              "type": "array",
+              "items": {"type": "number", "minimum": 0},
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "console_observations": {
+              "type": "object",
+              "required": ["complete_model_and_vae_load_lines", "resident_prompts"],
+              "properties": {
+                "complete_model_and_vae_load_lines": {"type": "string", "minLength": 1},
+                "resident_prompts": {"type": "string", "minLength": 1}
+              }
+            },
+            "benchmark": {"const": false},
+            "caveat": {"type": "string", "minLength": 1}
           }
         }
   },

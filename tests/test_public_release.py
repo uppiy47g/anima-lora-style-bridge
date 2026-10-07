@@ -42,6 +42,32 @@ class PublicReleaseTests(unittest.TestCase):
             evidence["measurements"]["user_observation_20_step"]["status"],
             "observational_non_controlled",
         )
+        prompt_baseline = evidence["measurements"][
+            "user_observed_xdna_resident_prompt_baseline"
+        ]
+        self.assertEqual(prompt_baseline["status"], "user_observed_comfyui_console")
+        self.assertFalse(prompt_baseline["benchmark"])
+        self.assertEqual(
+            prompt_baseline["fix_commit"],
+            "62dbd6063b69c0e20d327e991bfca8337fa24334",
+        )
+        resident = prompt_baseline["unchanged_resident_prompts"]
+        self.assertEqual(len(resident["total_seconds"]), 4)
+        self.assertAlmostEqual(
+            sum(resident["total_seconds"]) / 4,
+            resident["total_seconds_mean"],
+        )
+        self.assertAlmostEqual(
+            sum(resident["sampler_seconds_per_iteration"]) / 4,
+            resident["sampler_seconds_per_iteration_mean"],
+        )
+        self.assertIn("not a same-run controlled benchmark", prompt_baseline["caveat"])
+        self.assertEqual(
+            schema["properties"]["measurements"]["properties"][
+                "user_observed_xdna_resident_prompt_baseline"
+            ]["$ref"],
+            "#/$defs/userObservedResidentPromptBaseline",
+        )
         memory = evidence["measurements"]["cpu_model_memory"]
         self.assertEqual(
             memory["end_to_end_dtype_validation"],

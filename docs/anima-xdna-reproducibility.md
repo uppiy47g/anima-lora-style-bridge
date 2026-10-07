@@ -352,6 +352,30 @@ Likewise, a low Task Manager NPU percentage is not an AIE utilization
 measurement: short dispatches, synchronization, and substantial host work can
 leave gaps in that UI graph.
 
+## User-observed resident-prompt baseline after attachment cache fix
+
+On 2026-10-08, the user reported ComfyUI console timings after the stable
+attachment cache identity change in commit
+`62dbd6063b69c0e20d327e991bfca8337fa24334`. The configuration details captured
+were Turbo V1.1 BF16 + XDNA attached, 512×512, and four steps; prompt, seed,
+sampler, scheduler, and CFG were not captured and are intentionally omitted.
+This is a user-observed console record, not an independently rerun or
+instrumented benchmark.
+
+The cold first prompt took 105.34 s total and showed KSampler completing 4/4
+in 01:15 at 18.90 s/it. Four unchanged prompts then took 56.86, 56.56, 57.04,
+and 56.77 s total (mean 56.8075 s, range 56.56–57.04 s); their sampler rates
+were 12.49, 12.53, 12.67, and 12.60 s/it (mean 12.5725 s/it, range
+12.49–12.67 s/it). Progress elapsed displays were 00:49, 00:50, 00:50, and
+00:50. The console showed complete model/VAE load lines only on the cold
+prompt, with no model/VAE complete-load or BO setup lines between resident
+prompts. This is consistent with reuse but is not a separate runtime/BO trace.
+
+The user separately reported a prior CPU-only total range of 66.09–71.97 s.
+That is not a same-run controlled comparison; the console timings above should
+not be generalized as a benchmark. Full values and provenance are retained in
+the machine-readable evidence record.
+
 ## Optimization follow-up: measured boundary accounting
 
 The resident profiler reports stage wall time, XRT dispatches, H2D bytes,

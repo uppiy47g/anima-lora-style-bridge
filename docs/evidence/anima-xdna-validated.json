@@ -611,6 +611,42 @@
       "seconds_per_iteration": 25.59,
       "benchmark": false,
       "caveat": "Insufficient workflow and instrumentation metadata for a controlled benchmark."
+    },
+    "user_observed_xdna_resident_prompt_baseline": {
+      "status": "user_observed_comfyui_console",
+      "recorded_date": "2026-10-08",
+      "fix_commit": "62dbd6063b69c0e20d327e991bfca8337fa24334",
+      "configuration": {
+        "model": "Anima Turbo V1.1",
+        "model_dtype": "bfloat16",
+        "execution": "XDNA attached",
+        "width": 512,
+        "height": 512,
+        "steps": 4
+      },
+      "cold_prompt": {
+        "total_seconds": 105.34,
+        "sampler_progress_elapsed": "01:15",
+        "sampler_seconds_per_iteration": 18.90
+      },
+      "unchanged_resident_prompts": {
+        "total_seconds": [56.86, 56.56, 57.04, 56.77],
+        "sampler_seconds_per_iteration": [12.49, 12.53, 12.67, 12.60],
+        "sampler_progress_elapsed": ["00:49", "00:50", "00:50", "00:50"],
+        "total_seconds_mean": 56.8075,
+        "total_seconds_min": 56.56,
+        "total_seconds_max": 57.04,
+        "sampler_seconds_per_iteration_mean": 12.5725,
+        "sampler_seconds_per_iteration_min": 12.49,
+        "sampler_seconds_per_iteration_max": 12.67
+      },
+      "prior_cpu_only_user_reported_total_seconds_range": [66.09, 71.97],
+      "console_observations": {
+        "complete_model_and_vae_load_lines": "Observed on the cold prompt only.",
+        "resident_prompts": "No model/VAE complete-load or BO setup lines were observed between the four unchanged prompts; consistent with resident reuse, but not an independent runtime or BO trace."
+      },
+      "benchmark": false,
+      "caveat": "User-provided console screenshot observations, not independently rerun or instrumented by the project. The prior CPU-only range is a separately reported comparison, not a same-run controlled benchmark. Prompt, seed, sampler, scheduler, and CFG were not captured for this record."
     }
   },
   "image_conditions": {
